@@ -1,8 +1,11 @@
+import "dotenv/config";
 import { defineConfig } from '@prisma/config'
 
 export default defineConfig({
+  migrations: {
+    seed: 'tsx prisma/seed.ts',
+  },
   datasource: {
-    // Aquí sí va 'url' según la definición del tipo PrismaConfig de la v7
-    url: process.env.DATABASE_URL, 
+    url: process.env.DATABASE_URL,
   },
 })

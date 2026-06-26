@@ -1,33 +1,16 @@
 import type { Request, Response } from "express";
-import { z } from "zod";
-import { handleIncomingWhatsappMessage } from "../services/whatsapp.service.js";
-import { env } from "process";
-import { sendWhatsappDocumentMessage, sendWhatsappTextMessage, uploadWhatsappDocumentMedia } from "../services/meta-whatsapp.service.js";
-
-const incomingWhatsappSchema = z.object({
-  phone: z.string().min(5, "El teléfono es obligatorio"),
-  customerName: z.string().optional().default("Cliente"),
-  message: z.string().min(1, "El mensaje no puede estar vacío"),
-  messageId: z.string().optional(),
-  timestamp: z.string().optional()
-});
-
-export async function incomingWhatsappController(req: Request, res: Response) {
-  const parsed = incomingWhatsappSchema.safeParse(req.body);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Datos inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const result = await handleIncomingWhatsappMessage(parsed.data);
-
-  res.json(result);
-} 
- 
+import {
+  handleIncomingWhatsappMessage,
+  resolveAgentByPhoneNumberId,
+} from "../services/whatsapp.service.js";
+import {
+  sendWhatsappDocumentMessage,
+  sendWhatsappTextMessage,
+  uploadWhatsappDocumentMedia,
+} from "../services/meta-whatsapp.service.js";
+import { checkIdempotency, saveIdempotency } from "../lib/idempotency.js";
+import { env } from "../config/env.js";
+import { logger } from "../config/logger.js";
 
 export function verifyMetaWhatsappWebhookController(req: Request, res: Response) {
   const mode = req.query["hub.mode"];
@@ -49,7 +32,7 @@ export async function incomingMetaWhatsappWebhookController(
   req: Request,
   res: Response
 ) {
-  // Importante: responder rápido a Meta.
+  // Respond immediately to Meta
   res.sendStatus(200);
 
   try {
@@ -62,56 +45,114 @@ export async function incomingMetaWhatsappWebhookController(
         const value = change?.value;
         const messages = value?.messages ?? [];
         const contacts = value?.contacts ?? [];
+        const phoneNumberId: string = value?.metadata?.phone_number_id ?? env.META_PHONE_NUMBER_ID ?? "";
+
+        logger.info(`[WHATSAPP WEBHOOK] mensaje recibido (${messages.length} mensaje(s))`);
+        logger.info(`[WHATSAPP WEBHOOK] phone_number_id: ${phoneNumberId || "(vacío)"}`);
+
+        // Resolve tenant+agent from phone number ID
+        const resolved = await resolveAgentByPhoneNumberId(phoneNumberId);
+
+        if (!resolved) {
+          logger.warn(
+            `[WHATSAPP WEBHOOK] agente no encontrado para phone_number_id: ${phoneNumberId} (no se responde automáticamente)`
+          );
+          continue;
+        }
+
+        logger.info(
+          `[WHATSAPP WEBHOOK] agente encontrado: ${resolved.agentId} (tenant: ${resolved.tenantId})`
+        );
+
+        const { tenantId, agentId, agent } = resolved;
 
         for (const message of messages) {
-          if (message.type !== "text") {
+          const phone: string = message.from;
+          const messageId: string = message.id;
+          const messageType: string = message.type;
+
+          if (!phone || !messageId) continue;
+
+          // Idempotency: skip duplicate webhook deliveries
+          const idempotencyKey = `wa:${messageId}`;
+          const existing = await checkIdempotency(idempotencyKey, "webhook", tenantId);
+          if (existing.exists) {
+            logger.info(`[WHATSAPP WEBHOOK] duplicado ignorado: ${messageId}`);
             continue;
           }
 
-          const phone = message.from;
-          const text = message.text?.body;
-          const messageId = message.id;
           const timestamp = message.timestamp
             ? new Date(Number(message.timestamp) * 1000).toISOString()
             : new Date().toISOString();
 
           const contact = contacts.find((c: any) => c.wa_id === phone);
-          const customerName =
-            contact?.profile?.name || contact?.wa_id || "Cliente";
+          const customerName = contact?.profile?.name || phone;
 
-          if (!phone || !text) {
+          // Only process text messages for now (audio/image support can be added later)
+          if (messageType !== "text") {
+            logger.info(
+              `[WHATSAPP WEBHOOK] tipo no soportado (${messageType}), no se responde automáticamente`
+            );
+            await saveIdempotency(idempotencyKey, "webhook", 200, { skipped: true }, tenantId);
             continue;
           }
 
+          const text: string = message.text?.body ?? "";
+          if (!text) continue;
+
           const result = await handleIncomingWhatsappMessage({
+            tenantId,
+            agentId,
+            agentConfig: agent,
             phone,
             customerName,
             message: text,
             messageId,
-            timestamp
+            timestamp,
           });
 
-          await sendWhatsappTextMessage({
-            to: phone,
-            text: result.replyText
-          });
+          // Mark as processed
+          await saveIdempotency(idempotencyKey, "webhook", 200, { processed: true }, tenantId);
+
+          if (result.skipReply) continue;
+
+          try {
+            await sendWhatsappTextMessage({
+              to: phone,
+              text: result.replyText,
+              phoneNumberId,
+            });
+            logger.info(`[WHATSAPP WEBHOOK] respuesta enviada a WhatsApp (${phone})`);
+          } catch (sendErr) {
+            logger.error(
+              `[WHATSAPP WEBHOOK] error enviando respuesta a WhatsApp: ${
+                sendErr instanceof Error ? sendErr.message : String(sendErr)
+              }`
+            );
+            continue;
+          }
 
           if (result.pdfPath && result.pdfFilename) {
-            const uploaded = await uploadWhatsappDocumentMedia({
-              filePath: result.pdfPath
-            });
-
-            await sendWhatsappDocumentMessage({
-              to: phone,
-              mediaId: uploaded.id,
-              filename: result.pdfFilename,
-              caption: "Aquí tienes tu cotización en PDF."
-            });
+            try {
+              const uploaded = await uploadWhatsappDocumentMedia({
+                filePath: result.pdfPath,
+                phoneNumberId,
+              });
+              await sendWhatsappDocumentMessage({
+                to: phone,
+                mediaId: uploaded.id,
+                filename: result.pdfFilename,
+                caption: "Aquí tienes tu cotización en PDF.",
+                phoneNumberId,
+              });
+            } catch (pdfErr) {
+              logger.error("[Webhook] Error sending PDF:", pdfErr);
+            }
           }
         }
       }
     }
   } catch (error) {
-    console.error("❌ Error procesando webhook real de Meta:", error);
+    logger.error("❌ Error procesando webhook de Meta:", error);
   }
 }

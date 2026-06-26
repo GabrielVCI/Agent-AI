@@ -30,19 +30,26 @@
     "@prisma/client": "^7.8.0",
     "@types/form-data": "^2.2.1",
     "axios": "^1.16.1",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.18.3",
+    "express-rate-limit": "^8.5.2",
     "form-data": "^4.0.5",
     "helmet": "^7.1.0",
+    "ioredis": "^5.11.1",
     "morgan": "^1.10.0",
     "ngrok": "^5.0.0-beta.2",
     "openai": "^6.38.0",
     "pg": "^8.21.0",
     "puppeteer": "^25.0.4",
+    "winston": "^3.19.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^3.0.0",
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/morgan": "^1.9.9",
@@ -50,7 +57,7 @@
     "@types/pg": "^8.20.0",
     "cross-env": "^10.1.0",
     "prisma": "^7.8.0",
-    "tsx": "^4.19.2",
+    "tsx": "^4.22.1",
     "typescript": "^5.7.2"
   }
 }

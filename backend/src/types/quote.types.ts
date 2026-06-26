@@ -1,6 +1,8 @@
 export type CreateQuoteInput = {
-  phone: string;
-  customerName?: string;
+  tenantId: string;
+  customerId: string;
+  conversationId?: string;
+  agentId?: string;
 };
 
 export type AddQuoteItemInput = {

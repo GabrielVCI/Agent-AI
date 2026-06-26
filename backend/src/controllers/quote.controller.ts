@@ -1,4 +1,4 @@
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import {
   addQuoteItem,
@@ -6,195 +6,96 @@ import {
   createQuote,
   getQuoteById,
   recalculateQuote,
-  removeQuoteItem
+  removeQuoteItem,
 } from "../services/quote.service.js";
 import { presentQuote } from "../utils/quote-presenter.js";
 import { generateQuotePdf } from "../services/pdf.service.js";
-
-const createQuoteSchema = z.object({
-  phone: z.string().min(5, "El teléfono es obligatorio"),
-  customerName: z.string().optional()
-});
+import { AppError } from "../middlewares/error.middleware.js";
 
 const addItemSchema = z.object({
-  productId: z.string().min(1, "El productId es obligatorio"),
-  quantity: z.coerce.number().positive("La cantidad debe ser mayor que cero")
+  productId: z.string().min(1),
+  quantity: z.coerce.number().positive(),
 });
 
 const addItemBySearchSchema = z.object({
-  query: z.string().min(1, "El texto de búsqueda es obligatorio"),
-  quantity: z.coerce
-    .number()
-    .positive("La cantidad debe ser mayor que cero")
-    .optional()
-});
-
-const paramsSchema = z.object({
-  id: z.string().min(1)
+  query: z.string().min(1),
+  quantity: z.coerce.number().positive().optional(),
 });
 
 const removeLineParamsSchema = z.object({
   id: z.string().min(1),
-  lineId: z.string().min(1)
+  lineId: z.string().min(1),
 });
 
-export async function createQuoteController(req: Request, res: Response) {
-  const parsed = createQuoteSchema.safeParse(req.body);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Datos inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const quote = await createQuote(parsed.data);
-
-  res.status(201).json({
-    success: true,
-    data: presentQuote(quote)
-  });
+function getTenantId(req: Request): string {
+  const tenantId = req.tenantId;
+  if (!tenantId) throw new AppError("Empresa no identificada", 403);
+  return tenantId;
 }
 
-export async function getQuoteController(req: Request, res: Response) {
-  const parsed = paramsSchema.safeParse(req.params);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Parámetros inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const quote = await getQuoteById(parsed.data.id);
-
-  res.json({
-    success: true,
-    data: presentQuote(quote)
-  });
+export async function getQuoteController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const quote = await getQuoteById(req.params.id, tenantId);
+    res.json({ success: true, data: presentQuote(quote) });
+  } catch (err) { next(err); }
 }
 
-export async function addQuoteItemController(req: Request, res: Response) {
-  const params = paramsSchema.safeParse(req.params);
-  const body = addItemSchema.safeParse(req.body);
-
-  if (!params.success || !body.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Datos inválidos",
-      errors: {
-        params: !params.success ? params.error.flatten().fieldErrors : undefined,
-        body: !body.success ? body.error.flatten().fieldErrors : undefined
-      }
-    });
-  }
-
-  const quote = await addQuoteItem(params.data.id, body.data);
-
-  res.json({
-    success: true,
-    message: "Producto agregado a la cotización",
-    data: presentQuote(quote)
-  });
+export async function addQuoteItemController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const body = addItemSchema.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ success: false, errors: body.error.flatten().fieldErrors });
+      return;
+    }
+    const quote = await addQuoteItem(req.params.id, tenantId, body.data);
+    res.json({ success: true, data: presentQuote(quote) });
+  } catch (err) { next(err); }
 }
 
-export async function addQuoteItemBySearchController(
-  req: Request,
-  res: Response
-) {
-  const params = paramsSchema.safeParse(req.params);
-  const body = addItemBySearchSchema.safeParse(req.body);
-
-  if (!params.success || !body.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Datos inválidos",
-      errors: {
-        params: !params.success ? params.error.flatten().fieldErrors : undefined,
-        body: !body.success ? body.error.flatten().fieldErrors : undefined
-      }
-    });
-  }
-
-  const result = await addQuoteItemBySearch(params.data.id, body.data);
-
-  if ("needsConfirmation" in result && result.needsConfirmation) {
-    return res.status(200).json({
-      success: true,
-      needsConfirmation: true,
-      message: result.message,
-      searchResult: result.searchResult
-    });
-  }
-
-  res.json({
-    success: true,
-    needsConfirmation: false,
-    message: result.message,
-    searchResult: result.searchResult,
-    data: result.quote ? presentQuote(result.quote) : null
-  });
+export async function addQuoteItemBySearchController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const body = addItemBySearchSchema.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ success: false, errors: body.error.flatten().fieldErrors });
+      return;
+    }
+    const result = await addQuoteItemBySearch(req.params.id, tenantId, body.data);
+    if (result.needsConfirmation) {
+      res.status(200).json({ success: true, needsConfirmation: true, searchResult: result.searchResult });
+      return;
+    }
+    res.json({ success: true, needsConfirmation: false, data: result.quote ? presentQuote(result.quote) : null });
+  } catch (err) { next(err); }
 }
 
-export async function removeQuoteItemController(req: Request, res: Response) {
-  const parsed = removeLineParamsSchema.safeParse(req.params);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Parámetros inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const quote = await removeQuoteItem(parsed.data.id, parsed.data.lineId);
-
-  res.json({
-    success: true,
-    message: "Producto eliminado de la cotización",
-    data: presentQuote(quote)
-  });
+export async function removeQuoteItemController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const parsed = removeLineParamsSchema.safeParse(req.params);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    const quote = await removeQuoteItem(parsed.data.id, tenantId, parsed.data.lineId);
+    res.json({ success: true, data: presentQuote(quote) });
+  } catch (err) { next(err); }
 }
 
-export async function recalculateQuoteController(req: Request, res: Response) {
-  const parsed = paramsSchema.safeParse(req.params);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Parámetros inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const quote = await recalculateQuote(parsed.data.id);
-
-  res.json({
-    success: true,
-    message: "Cotización recalculada",
-    data: presentQuote(quote)
-  });
+export async function recalculateQuoteController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const quote = await recalculateQuote(req.params.id, tenantId);
+    res.json({ success: true, data: presentQuote(quote) });
+  } catch (err) { next(err); }
 }
 
-export async function generateQuotePdfController(req: Request, res: Response) {
-  const parsed = paramsSchema.safeParse(req.params);
-
-  if (!parsed.success) {
-    return res.status(400).json({
-      success: false,
-      message: "Parámetros inválidos",
-      errors: parsed.error.flatten().fieldErrors
-    });
-  }
-
-  const result = await generateQuotePdf(parsed.data.id);
-
-  res.json({
-    success: true,
-    message: "PDF generado correctamente",
-    pdfUrl: result.pdfUrl,
-    fileName: result.fileName
-  });
+export async function generateQuotePdfController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = getTenantId(req);
+    const result = await generateQuotePdf(req.params.id, tenantId);
+    res.json({ success: true, pdfUrl: result.pdfUrl, fileName: result.fileName });
+  } catch (err) { next(err); }
 }

@@ -1,8 +1,13 @@
 import { env } from "../config/env.js";
 import { getOpenAIClient } from "../config/openai.js";
 import { prisma } from "../config/prisma.js";
-import type { AgentDecision } from "../types/agent.types.js";
+import { logger } from "../config/logger.js";
+import type { AgentDecision, AgentRunResult, AiUsage } from "../types/agent.types.js";
 import { agentDecisionJsonSchema } from "./agent.schema.js";
+import { extractUsage } from "./ai/ai-usage.service.js";
+import { describeOpenAiError, OPENAI_FAILURE_REPLY } from "./ai/openai-error.js";
+
+const ZERO_USAGE: AiUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
 type ConversationMessageForAgent = {
   direction: string;
@@ -15,122 +20,151 @@ type RunAgentInput = {
   message: string;
   quoteNumber?: string | null;
   conversationHistory: ConversationMessageForAgent[];
+  agentConfig?: {
+    systemPrompt?: string | null;
+    tone?: string | null;
+    openAiModel?: string | null;
+    industry?: string | null;
+    businessName?: string | null;
+  };
 };
 
 const fallbackDecision: AgentDecision = {
   intent: "UNKNOWN",
   replyText:
-    "Recibí tu mensaje. En este momento estoy preparando la información para ayudarte con productos y cotizaciones.",
+    "Recibí tu mensaje. En este momento estoy preparando la información para ayudarte.",
   productRequests: [],
-  actions: [
-    {
-      type: "NONE",
-      payload: {}
-    }
-  ],
+  actions: [{ type: "NONE", payload: {} }],
   requiresHuman: false,
-  confidence: 0.3
+  confidence: 0.3,
 };
 
-export async function runSalesAgent(
-  input: RunAgentInput
-): Promise<AgentDecision> {
+/**
+ * Motor IA central. Recibe el mensaje del cliente + configuración del agente,
+ * llama a OpenAI con salida estructurada validada por JSON schema y devuelve
+ * la decisión junto con los metadatos de uso (modelo, tokens, éxito/fallback).
+ *
+ * Nunca lanza por errores de OpenAI: degrada a una decisión de respaldo para
+ * no romper el webhook ni dejar la conversación sin estado.
+ */
+export async function runSalesAgent(input: RunAgentInput): Promise<AgentRunResult> {
   const client = getOpenAIClient();
+  const model = input.agentConfig?.openAiModel || env.OPENAI_DEFAULT_MODEL || env.OPENAI_MODEL;
 
+  // Sin API key: degradamos a reglas básicas para que el entorno local siga vivo.
   if (!client) {
-    return buildRuleBasedFallback(input);
+    return {
+      decision: buildRuleBasedFallback(input),
+      usage: ZERO_USAGE,
+      model,
+      success: false,
+      usedFallback: true,
+      errorMessage: "OPENAI_API_KEY no configurada",
+    };
   }
 
   const userPayload = {
     customerName: input.customerName || "Cliente",
     currentMessage: input.message,
     quoteNumber: input.quoteNumber || null,
-    conversationHistory: input.conversationHistory.slice(-10).map((message) => ({
-      direction: message.direction,
-      senderType: message.senderType,
-      content: message.content
-    }))
+    conversationHistory: input.conversationHistory.slice(-10).map((m) => ({
+      direction: m.direction,
+      senderType: m.senderType,
+      content: m.content,
+    })),
   };
 
   try {
-    // 1. Corregido al método oficial chat.completions.create
     const response = await client.chat.completions.create({
-      model: env.OPENAI_MODEL,
-      // 2. Cambiado 'input' por 'messages'
+      model,
+      temperature: env.OPENAI_TEMPERATURE,
+      max_tokens: env.OPENAI_MAX_OUTPUT_TOKENS,
       messages: [
-        {
-          role: "system",
-          content: buildSystemPrompt()
-        },
-        {
-          role: "user",
-          content: JSON.stringify(userPayload)
-        }
+        { role: "system", content: buildSystemPrompt(input.agentConfig) },
+        { role: "user", content: JSON.stringify(userPayload) },
       ],
-      // 3. Cambiado 'text.format' por el estándar 'response_format'
       response_format: {
         type: "json_schema",
         json_schema: {
           name: agentDecisionJsonSchema.name,
           schema: agentDecisionJsonSchema.schema,
-          strict: agentDecisionJsonSchema.strict
-        }
-      }
+          strict: agentDecisionJsonSchema.strict,
+        },
+      },
     });
 
-    // 4. Extracción real del contenido del JSON estructurado
-    const outputText = response.choices[0].message.content;
+    const usage = extractUsage(response.usage);
+    const outputText = response.choices[0]?.message?.content;
 
     if (!outputText) {
-      return fallbackDecision;
+      return {
+        decision: fallbackDecision,
+        usage,
+        model,
+        success: false,
+        usedFallback: true,
+        errorMessage: "OpenAI no devolvió contenido",
+      };
     }
 
     const parsed = JSON.parse(outputText) as AgentDecision;
+    return {
+      decision: normalizeAgentDecision(parsed),
+      usage,
+      model,
+      success: true,
+      usedFallback: false,
+    };
+  } catch (error) {
+    const info = describeOpenAiError(error);
+    logger.error(`❌ Error ejecutando IA: ${info.logMessage}`);
 
-    return normalizeAgentDecision(parsed);
-  } catch (error: any) {
-    console.error("❌ Error ejecutando IA:");
-    console.error("Mensaje:", error?.message);
-    console.error("Status:", error?.status);
-    console.error("Code:", error?.code);
-    console.error("Type:", error?.type);
-    console.error("Response:", error?.response?.data || error);
-
-    return buildRuleBasedFallback(input);
+    // Ante un fallo real de OpenAI sugerimos intervención humana con un
+    // mensaje claro al cliente, en lugar de inventar una respuesta.
+    return {
+      decision: {
+        ...fallbackDecision,
+        intent: "HUMAN_HANDOFF",
+        replyText: OPENAI_FAILURE_REPLY,
+        requiresHuman: true,
+        actions: [{ type: "HANDOFF", payload: { reason: "Error procesando con IA" } }],
+      },
+      usage: ZERO_USAGE,
+      model,
+      success: false,
+      usedFallback: true,
+      errorMessage: info.logMessage,
+    };
   }
 }
 
-function buildSystemPrompt() {
+function buildSystemPrompt(config?: RunAgentInput["agentConfig"]): string {
+  // If the agent has a custom system prompt, use it as-is.
+  if (config?.systemPrompt) {
+    return config.systemPrompt;
+  }
+
+  const businessName = config?.businessName ?? "el negocio";
+  const industry = config?.industry ?? "ventas";
+  const tone = config?.tone ?? "Profesional. Breve. Estilo WhatsApp.";
+
   return `
-Eres un agente IA de ventas especializado en ferretería.
+Eres un agente IA de ventas especializado en ${industry} para ${businessName}.
 
 Tu trabajo es interpretar mensajes de clientes por WhatsApp y devolver una decisión estructurada.
 
 IMPORTANTE:
-- No inventes precios.
-- No inventes disponibilidad.
-- No digas que un producto existe si no ha sido consultado.
-- No calcules totales.
-- No generes cotizaciones por tu cuenta.
+- No inventes precios ni disponibilidad.
+- No calcules totales ni generes cotizaciones directamente.
 - Solo extrae intención, productos, cantidades y acciones sugeridas.
-- El backend será quien busque productos, calcule precios y genere cotizaciones.
+- El backend busca productos, calcula precios y genera cotizaciones.
 
-Tono:
-- Español dominicano neutro.
-- Profesional.
-- Breve.
-- Claro.
-- Estilo WhatsApp.
+Tono: ${tone}
 
-Correcciones comunes:
-- tiner, tinner, tinel => thinner.
+Correcciones comunes de ferretería (si aplica al negocio):
+- tiner, tinner => thinner.
 - calvanizado => galvanizado.
-- llavin llame => llavín Yale.
-- yales => Yale.
 - disco #7 => disco de corte 7 pulgadas.
-- disco #4 => disco de pulir 4 pulgadas.
-- soldadura fina => electrodo fino.
-- oxido gris plata => óxido gris plata.
 
 Intenciones:
 - GREETING: saludo.
@@ -138,27 +172,26 @@ Intenciones:
 - ASK_PRICE: cliente pregunta precio.
 - ADD_TO_QUOTE: cliente quiere agregar o cotizar producto.
 - REMOVE_FROM_QUOTE: cliente quiere quitar producto.
-- GENERATE_QUOTE: cliente quiere generar o recibir cotización/PDF.
+- GENERATE_QUOTE: cliente quiere cotización/PDF.
 - ASK_RECOMMENDATION: cliente pide recomendación.
-- HUMAN_HANDOFF: cliente pide humano, descuento, crédito, queja o condición especial.
+- HUMAN_HANDOFF: cliente pide humano, descuento, crédito o condición especial.
 - UNKNOWN: no está claro.
 
 Reglas para productRequests:
-- Si el cliente menciona productos, extrae cada producto.
-- Si el cliente manda una lista técnica, divide por líneas.
-- quantity debe ser número. Si no hay cantidad, usa 1.
-- unit debe ser string. Si no sabes la unidad, usa "".
-- originalText debe ser el texto del cliente para ese producto.
-- normalizedText debe ser tu mejor interpretación corregida.
+- Extrae cada producto mencionado.
+- quantity debe ser número (default 1).
+- unit debe ser string (vacío si no aplica).
+- originalText: texto del cliente para ese producto.
+- normalizedText: tu mejor interpretación corregida.
 
 Reglas para actions:
-- Si hay productos: usa ADD_TO_QUOTE o SEARCH_PRODUCT.
-- Si pide PDF/cotización final: usa GENERATE_PDF.
-- Si pide humano/descuento/crédito: usa HANDOFF.
-- Si es saludo: usa NONE.
-- payload debe ser objeto, aunque esté vacío.
+- Si hay productos: ADD_TO_QUOTE o SEARCH_PRODUCT.
+- Si pide PDF/cotización: GENERATE_PDF.
+- Si pide humano/descuento/crédito: HANDOFF.
+- Si es saludo: NONE.
+- payload debe ser objeto aunque esté vacío.
 
-La respuesta debe ser JSON válido siguiendo el esquema indicado.
+Devuelve JSON válido siguiendo el esquema indicado.
 `;
 }
 
@@ -167,30 +200,18 @@ function normalizeAgentDecision(decision: AgentDecision): AgentDecision {
     intent: decision.intent || "UNKNOWN",
     replyText: decision.replyText || fallbackDecision.replyText,
     productRequests: Array.isArray(decision.productRequests)
-      ? decision.productRequests.map((product) => ({
-          originalText: product.originalText || product.normalizedText || "",
-          normalizedText: product.normalizedText || product.originalText || "",
-          quantity:
-            typeof product.quantity === "number" && product.quantity > 0
-              ? product.quantity
-              : 1,
-          unit: product.unit || ""
+      ? decision.productRequests.map((p) => ({
+          originalText: p.originalText || p.normalizedText || "",
+          normalizedText: p.normalizedText || p.originalText || "",
+          quantity: typeof p.quantity === "number" && p.quantity > 0 ? p.quantity : 1,
+          unit: p.unit || "",
         }))
       : [],
     actions: Array.isArray(decision.actions)
-      ? decision.actions.map((action) => ({
-          type: action.type || "NONE",
-          payload: action.payload || {}
-        }))
-      : [
-          {
-            type: "NONE",
-            payload: {}
-          }
-        ],
+      ? decision.actions.map((a) => ({ type: a.type || "NONE", payload: a.payload || {} }))
+      : [{ type: "NONE", payload: {} }],
     requiresHuman: Boolean(decision.requiresHuman),
-    confidence:
-      typeof decision.confidence === "number" ? decision.confidence : 0.5
+    confidence: typeof decision.confidence === "number" ? decision.confidence : 0.5,
   };
 }
 
@@ -200,41 +221,27 @@ function buildRuleBasedFallback(input: RunAgentInput): AgentDecision {
   if (message.includes("hola") || message.includes("buenas")) {
     return {
       intent: "GREETING",
-      replyText: `¡Hola ${input.customerName || "Cliente"}! Soy el asistente virtual de ventas. ¿En qué puedo ayudarte hoy?`,
+      replyText: `¡Hola ${input.customerName || "Cliente"}! Soy el asistente virtual. ¿En qué puedo ayudarte hoy?`,
       productRequests: [],
-      actions: [
-        {
-          type: "NONE",
-          payload: {}
-        }
-      ],
+      actions: [{ type: "NONE", payload: {} }],
       requiresHuman: false,
-      confidence: 0.8
+      confidence: 0.8,
     };
   }
 
   if (
     message.includes("descuento") ||
     message.includes("credito") ||
-    message.includes("crédito") ||
     message.includes("humano") ||
     message.includes("vendedor")
   ) {
     return {
       intent: "HUMAN_HANDOFF",
-      replyText:
-        "Para ayudarte con esa solicitud, voy a pasar tu caso a un asesor de ventas.",
+      replyText: "Voy a pasar tu caso a un asesor.",
       productRequests: [],
-      actions: [
-        {
-          type: "HANDOFF",
-          payload: {
-            reason: "Solicitud requiere atención humana"
-          }
-        }
-      ],
+      actions: [{ type: "HANDOFF", payload: { reason: "Solicitud requiere atención humana" } }],
       requiresHuman: true,
-      confidence: 0.8
+      confidence: 0.8,
     };
   }
 
@@ -242,18 +249,22 @@ function buildRuleBasedFallback(input: RunAgentInput): AgentDecision {
 }
 
 export async function saveAgentLog(input: {
+  tenantId?: string;
+  agentId?: string;
   conversationId?: string;
   userInput: string;
   decision: AgentDecision;
 }) {
   await prisma.agentLog.create({
     data: {
-      conversationId: input.conversationId,
+      tenantId: input.tenantId ?? null,
+      agentId: input.agentId ?? null,
+      conversationId: input.conversationId ?? null,
       input: input.userInput,
       output: input.decision as unknown as object,
       intent: input.decision.intent,
       confidence: input.decision.confidence,
-      requiresHuman: input.decision.requiresHuman
-    }
+      requiresHuman: input.decision.requiresHuman,
+    },
   });
 }

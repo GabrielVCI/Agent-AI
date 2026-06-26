@@ -20,4 +20,5 @@ export type WhatsappIncomingResponse = {
   pdfPath?: string | null;
   pdfFilename?: string | null;
   requiresHuman: boolean;
+  skipReply?: boolean;
 };

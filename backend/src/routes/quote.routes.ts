@@ -1,17 +1,19 @@
 import { Router } from "express";
+import { requireAuth } from "../middlewares/auth.middleware.js";
+import { requireTenantAccess } from "../middlewares/roles.middleware.js";
 import {
   addQuoteItemBySearchController,
   addQuoteItemController,
-  createQuoteController,
   generateQuotePdfController,
   getQuoteController,
   recalculateQuoteController,
-  removeQuoteItemController
+  removeQuoteItemController,
 } from "../controllers/quote.controller.js";
 
 export const quoteRoutes = Router();
 
-quoteRoutes.post("/", createQuoteController);
+quoteRoutes.use(requireAuth, requireTenantAccess);
+
 quoteRoutes.get("/:id", getQuoteController);
 quoteRoutes.get("/:id/pdf", generateQuotePdfController);
 quoteRoutes.post("/:id/items", addQuoteItemController);

@@ -3,19 +3,25 @@ import fs from "fs";
 import FormData from "form-data";
 import { env } from "../config/env.js";
 
+function resolvePhoneNumberId(overrideId?: string): string {
+  const id = overrideId || env.META_PHONE_NUMBER_ID;
+  if (!id) throw new Error("META_PHONE_NUMBER_ID no está configurado.");
+  return id;
+}
+
+function getToken(): string {
+  if (!env.META_WHATSAPP_TOKEN) throw new Error("META_WHATSAPP_TOKEN no está configurado.");
+  return env.META_WHATSAPP_TOKEN;
+}
+
 export async function sendWhatsappTextMessage(input: {
   to: string;
   text: string;
+  phoneNumberId?: string;
 }) {
-  if (!env.META_WHATSAPP_TOKEN || !env.META_PHONE_NUMBER_ID) {
-    throw new Error(
-      "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID en variables de entorno."
-    );
-  }
-
-  const apiVersion = env.META_GRAPH_API_VERSION || "v20.0";
-
-  const url = `https://graph.facebook.com/${apiVersion}/${env.META_PHONE_NUMBER_ID}/messages`;
+  const phoneId = resolvePhoneNumberId(input.phoneNumberId);
+  const token = getToken();
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/messages`;
 
   const response = await axios.post(
     url,
@@ -24,17 +30,11 @@ export async function sendWhatsappTextMessage(input: {
       recipient_type: "individual",
       to: input.to,
       type: "text",
-      text: {
-        preview_url: false,
-        body: input.text
-      }
+      text: { preview_url: false, body: input.text },
     },
     {
-      headers: {
-        Authorization: `Bearer ${env.META_WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 15000
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      timeout: 15000,
     }
   );
 
@@ -43,38 +43,27 @@ export async function sendWhatsappTextMessage(input: {
 
 export async function uploadWhatsappDocumentMedia(input: {
   filePath: string;
+  phoneNumberId?: string;
 }) {
-  if (!env.META_WHATSAPP_TOKEN || !env.META_PHONE_NUMBER_ID) {
-    throw new Error(
-      "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID en variables de entorno."
-    );
-  }
+  const phoneId = resolvePhoneNumberId(input.phoneNumberId);
+  const token = getToken();
 
   if (!fs.existsSync(input.filePath)) {
     throw new Error(`No se encontró el archivo PDF: ${input.filePath}`);
   }
 
-  const apiVersion = env.META_GRAPH_API_VERSION || "v20.0";
-
-  const url = `https://graph.facebook.com/${apiVersion}/${env.META_PHONE_NUMBER_ID}/media`;
-
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/media`;
   const form = new FormData();
-
   form.append("messaging_product", "whatsapp");
   form.append("type", "application/pdf");
   form.append("file", fs.createReadStream(input.filePath));
 
   const response = await axios.post(url, form, {
-    headers: {
-      Authorization: `Bearer ${env.META_WHATSAPP_TOKEN}`,
-      ...form.getHeaders()
-    },
-    timeout: 30000
+    headers: { Authorization: `Bearer ${token}`, ...form.getHeaders() },
+    timeout: 30000,
   });
 
-  return response.data as {
-    id: string;
-  };
+  return response.data as { id: string };
 }
 
 export async function sendWhatsappDocumentMessage(input: {
@@ -82,16 +71,11 @@ export async function sendWhatsappDocumentMessage(input: {
   mediaId: string;
   filename: string;
   caption?: string;
+  phoneNumberId?: string;
 }) {
-  if (!env.META_WHATSAPP_TOKEN || !env.META_PHONE_NUMBER_ID) {
-    throw new Error(
-      "Faltan META_WHATSAPP_TOKEN o META_PHONE_NUMBER_ID en variables de entorno."
-    );
-  }
-
-  const apiVersion = env.META_GRAPH_API_VERSION || "v20.0";
-
-  const url = `https://graph.facebook.com/${apiVersion}/${env.META_PHONE_NUMBER_ID}/messages`;
+  const phoneId = resolvePhoneNumberId(input.phoneNumberId);
+  const token = getToken();
+  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/messages`;
 
   const response = await axios.post(
     url,
@@ -103,15 +87,12 @@ export async function sendWhatsappDocumentMessage(input: {
       document: {
         id: input.mediaId,
         filename: input.filename,
-        caption: input.caption || "Cotización en PDF"
-      }
+        caption: input.caption || "Cotización en PDF",
+      },
     },
     {
-      headers: {
-        Authorization: `Bearer ${env.META_WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 15000
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      timeout: 15000,
     }
   );
 

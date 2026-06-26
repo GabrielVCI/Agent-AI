@@ -1,119 +1,208 @@
-import { Prisma } from "@prisma/client"; // 1. Importamos Prisma para acceder a sus tipos JSON
+import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
-
-const DEMO_BUSINESS_ID = "demo-ferreteria";
+import { AppError } from "../middlewares/error.middleware.js";
 
 export async function findOrCreateCustomer(input: {
+  tenantId: string;
   phone: string;
   customerName?: string;
 }) {
   return prisma.customer.upsert({
     where: {
-      businessId_phone: {
-        businessId: DEMO_BUSINESS_ID,
-        phone: input.phone
-      }
+      tenantId_phone: { tenantId: input.tenantId, phone: input.phone },
     },
     update: {
-      name: input.customerName ?? undefined
+      name: input.customerName ?? undefined,
     },
     create: {
-      businessId: DEMO_BUSINESS_ID,
+      tenantId: input.tenantId,
       phone: input.phone,
-      name: input.customerName ?? "Cliente"
-    }
+      name: input.customerName ?? "Cliente",
+    },
   });
 }
 
 export async function findOrCreateActiveConversation(input: {
+  tenantId: string;
   customerId: string;
+  agentId?: string;
+  whatsappPhone?: string;
+  customerName?: string;
 }) {
-  const existingConversation = await prisma.conversation.findFirst({
+  const existing = await prisma.conversation.findFirst({
     where: {
-      businessId: DEMO_BUSINESS_ID,
+      tenantId: input.tenantId,
       customerId: input.customerId,
-      status: {
-        in: ["ACTIVE", "WAITING_HUMAN"]
-      }
+      status: { in: ["BOT_ACTIVE", "HUMAN_ACTIVE", "OPEN"] },
     },
-    orderBy: {
-      updatedAt: "desc"
-    }
+    orderBy: { updatedAt: "desc" },
   });
 
-  if (existingConversation) {
-    return existingConversation;
-  }
+  if (existing) return { conversation: existing, created: false };
 
-  return prisma.conversation.create({
+  const conversation = await prisma.conversation.create({
     data: {
-      businessId: DEMO_BUSINESS_ID,
+      tenantId: input.tenantId,
       customerId: input.customerId,
-      status: "ACTIVE",
-      lastMessageAt: new Date()
-    }
+      agentId: input.agentId ?? null,
+      whatsappPhone: input.whatsappPhone ?? null,
+      customerName: input.customerName ?? null,
+      status: "BOT_ACTIVE",
+      lastMessageAt: new Date(),
+    },
   });
+
+  return { conversation, created: true };
 }
 
-// 2. Corregido: Cambiamos Record<string, unknown> por Prisma.InputJsonValue
 export async function saveInboundMessage(input: {
+  tenantId: string;
   conversationId: string;
-  content: string;
-  messageId?: string;
-  metadata?: Prisma.InputJsonValue; 
-}) {
-  return prisma.message.create({
-    data: {
-      conversationId: input.conversationId,
-      direction: "INBOUND",
-      senderType: "CUSTOMER",
-      content: input.content,
-      messageId: input.messageId,
-      metadata: input.metadata ?? Prisma.JsonNull // Opcional: evita conflictos con nulls de bases de datos
-    }
-  });
-}
-
-// 3. Corregido: Cambiamos Record<string, unknown> por Prisma.InputJsonValue
-export async function saveOutboundAgentMessage(input: {
-  conversationId: string;
-  content: string;
+  textContent: string;
+  whatsappMessageId?: string;
   metadata?: Prisma.InputJsonValue;
 }) {
   return prisma.message.create({
     data: {
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      direction: "INBOUND",
+      senderType: "CUSTOMER",
+      messageType: "TEXT",
+      textContent: input.textContent,
+      whatsappMessageId: input.whatsappMessageId,
+      metadata: input.metadata ?? Prisma.JsonNull,
+    },
+  });
+}
+
+export async function saveOutboundAgentMessage(input: {
+  tenantId: string;
+  conversationId: string;
+  textContent: string;
+  metadata?: Prisma.InputJsonValue;
+}) {
+  return prisma.message.create({
+    data: {
+      tenantId: input.tenantId,
       conversationId: input.conversationId,
       direction: "OUTBOUND",
       senderType: "AGENT",
-      content: input.content,
-      metadata: input.metadata ?? Prisma.JsonNull
-    }
+      messageType: "TEXT",
+      textContent: input.textContent,
+      metadata: input.metadata ?? Prisma.JsonNull,
+    },
+  });
+}
+
+export async function saveHumanMessage(input: {
+  tenantId: string;
+  conversationId: string;
+  textContent: string;
+}) {
+  return prisma.message.create({
+    data: {
+      tenantId: input.tenantId,
+      conversationId: input.conversationId,
+      direction: "OUTBOUND",
+      senderType: "HUMAN",
+      messageType: "TEXT",
+      textContent: input.textContent,
+    },
   });
 }
 
 export async function updateConversationLastMessage(input: {
   conversationId: string;
+  preview?: string;
   requiresHuman?: boolean;
 }) {
+  const newStatus = input.requiresHuman ? "HUMAN_ACTIVE" : undefined;
+
   return prisma.conversation.update({
-    where: {
-      id: input.conversationId
-    },
+    where: { id: input.conversationId },
     data: {
       lastMessageAt: new Date(),
-      requiresHuman: input.requiresHuman ?? false
-    }
+      lastMessagePreview: input.preview,
+      ...(newStatus ? { status: newStatus } : {}),
+    },
   });
 }
 
 export async function getConversationHistory(conversationId: string) {
   return prisma.message.findMany({
-    where: {
-      conversationId
-    },
-    orderBy: {
-      createdAt: "asc"
-    },
-    take: 20
+    where: { conversationId },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+}
+
+export async function takeoverConversation(input: {
+  tenantId: string;
+  conversationId: string;
+  userId: string;
+  reason?: string;
+}) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: input.conversationId, tenantId: input.tenantId },
+  });
+
+  if (!conversation) throw new AppError("Conversación no encontrada", 404);
+
+  await prisma.$transaction([
+    prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: { status: "HUMAN_ACTIVE", assignedToUserId: input.userId },
+    }),
+    prisma.humanHandoff.create({
+      data: {
+        tenantId: input.tenantId,
+        conversationId: input.conversationId,
+        reason: input.reason ?? "Intervención manual",
+        status: "ASSIGNED",
+        assignedTo: input.userId,
+      },
+    }),
+  ]);
+}
+
+export async function releaseConversationToAgent(input: {
+  tenantId: string;
+  conversationId: string;
+}) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: input.conversationId, tenantId: input.tenantId },
+  });
+
+  if (!conversation) throw new AppError("Conversación no encontrada", 404);
+
+  await prisma.$transaction([
+    prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: { status: "BOT_ACTIVE", assignedToUserId: null },
+    }),
+    prisma.humanHandoff.updateMany({
+      where: {
+        conversationId: input.conversationId,
+        status: { in: ["OPEN", "ASSIGNED"] },
+      },
+      data: { status: "RESOLVED", resolvedAt: new Date() },
+    }),
+  ]);
+}
+
+export async function closeConversation(input: {
+  tenantId: string;
+  conversationId: string;
+}) {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: input.conversationId, tenantId: input.tenantId },
+  });
+
+  if (!conversation) throw new AppError("Conversación no encontrada", 404);
+
+  return prisma.conversation.update({
+    where: { id: input.conversationId },
+    data: { status: "CLOSED" },
   });
 }

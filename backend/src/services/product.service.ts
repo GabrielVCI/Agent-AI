@@ -4,62 +4,41 @@ import { applyProductCorrections } from "../utils/product-corrections.js";
 import {
   normalizeText,
   removeCommonNoise,
-  tokenize
+  tokenize,
 } from "../utils/text-normalizer.js";
 import type {
   ProductSearchResult,
-  ProductWithAliases
+  ProductWithAliases,
 } from "../types/product-search.types.js";
 
-const DEMO_BUSINESS_ID = "demo-ferreteria";
-
-export async function listProducts() {
+export async function listProducts(tenantId: string) {
   return prisma.product.findMany({
-    where: {
-      businessId: DEMO_BUSINESS_ID,
-      isActive: true
-    },
-    include: {
-      aliases: true
-    },
-    orderBy: {
-      name: "asc"
-    }
+    where: { tenantId, isActive: true },
+    include: { aliases: true },
+    orderBy: { name: "asc" },
   });
 }
 
-export async function searchProduct(
-  query: string
+export async function searchProductForTenant(
+  query: string,
+  tenantId: string
 ): Promise<ProductSearchResult> {
   const cleanedQuery = query.trim();
 
   if (!cleanedQuery) {
-    return {
-      status: "NOT_FOUND",
-      originalText: query,
-      normalizedText: "",
-      confidence: 0
-    };
+    return { status: "NOT_FOUND", originalText: query, normalizedText: "", confidence: 0 };
   }
 
   const correction = applyProductCorrections(cleanedQuery);
   const normalizedQuery = correction.normalizedText;
 
   const products = await prisma.product.findMany({
-    where: {
-      businessId: DEMO_BUSINESS_ID,
-      isActive: true
-    },
-    include: {
-      aliases: true
-    }
+    where: { tenantId, isActive: true },
+    include: { aliases: true },
   });
 
   const scoredProducts = products
-    .map((product) => ({
-      product,
-      score: scoreProductMatch(product, normalizedQuery)
-    }))
+    .map((product) => ({ product, score: scoreProductMatch(product, normalizedQuery) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score);
 
@@ -69,7 +48,7 @@ export async function searchProduct(
       originalText: cleanedQuery,
       normalizedText: normalizedQuery,
       confidence: 0,
-      correctionApplied: correction.correctionApplied
+      correctionApplied: correction.correctionApplied,
     };
   }
 
@@ -77,13 +56,7 @@ export async function searchProduct(
   const second = scoredProducts[1];
 
   if (!best) {
-    return {
-      status: "NOT_FOUND",
-      originalText: cleanedQuery,
-      normalizedText: normalizedQuery,
-      confidence: 0,
-      correctionApplied: correction.correctionApplied
-    };
+    return { status: "NOT_FOUND", originalText: cleanedQuery, normalizedText: normalizedQuery, confidence: 0 };
   }
 
   const confidence = Math.min(best.score, 1);
@@ -95,7 +68,7 @@ export async function searchProduct(
       normalizedText: normalizedQuery,
       confidence,
       correctionApplied: correction.correctionApplied,
-      product: best.product
+      product: best.product,
     };
   }
 
@@ -106,7 +79,7 @@ export async function searchProduct(
       normalizedText: normalizedQuery,
       confidence,
       correctionApplied: correction.correctionApplied,
-      suggestions: scoredProducts.slice(0, 5).map((item) => item.product)
+      suggestions: scoredProducts.slice(0, 5).map((item) => item.product),
     };
   }
 
@@ -118,7 +91,7 @@ export async function searchProduct(
       confidence,
       correctionApplied: correction.correctionApplied,
       product: best.product,
-      suggestions: scoredProducts.slice(0, 3).map((item) => item.product)
+      suggestions: scoredProducts.slice(0, 3).map((item) => item.product),
     };
   }
 
@@ -128,9 +101,12 @@ export async function searchProduct(
     normalizedText: normalizedQuery,
     confidence,
     correctionApplied: correction.correctionApplied,
-    suggestions: scoredProducts.slice(0, 3).map((item) => item.product)
+    suggestions: scoredProducts.slice(0, 3).map((item) => item.product),
   };
 }
+
+// Legacy alias for backward compatibility within this module
+export const searchProduct = searchProductForTenant;
 
 function scoreProductMatch(
   product: ProductWithAliases,
@@ -138,32 +114,20 @@ function scoreProductMatch(
 ): number {
   const query = removeCommonNoise(normalizedQuery);
   const productName = removeCommonNoise(product.name);
-  const productCategory = product.category
-    ? removeCommonNoise(product.category)
-    : "";
+  const productCategory = product.category ? removeCommonNoise(product.category) : "";
   const productBrand = product.brand ? removeCommonNoise(product.brand) : "";
-  const productDescription = product.description
-    ? removeCommonNoise(product.description)
-    : "";
-
-  const aliases = product.aliases.map((alias) => removeCommonNoise(alias.alias));
+  const productDescription = product.description ? removeCommonNoise(product.description) : "";
+  const aliases = product.aliases.map((a) => removeCommonNoise(a.alias));
 
   let score = 0;
 
-  if (productName === query) {
-    score = Math.max(score, 1);
-  }
-
+  if (productName === query) score = Math.max(score, 1);
   for (const alias of aliases) {
-    if (alias === query) {
-      score = Math.max(score, 0.98);
-    }
+    if (alias === query) score = Math.max(score, 0.98);
   }
-
   if (productName.includes(query) || query.includes(productName)) {
     score = Math.max(score, 0.88);
   }
-
   for (const alias of aliases) {
     if (alias.includes(query) || query.includes(alias)) {
       score = Math.max(score, 0.86);
@@ -171,78 +135,37 @@ function scoreProductMatch(
   }
 
   const queryTokens = tokenize(query);
-
   if (queryTokens.length > 0) {
-    const searchableText = [
-      productName,
-      productCategory,
-      productBrand,
-      productDescription,
-      ...aliases
-    ].join(" ");
-
-    const matchedTokens = queryTokens.filter((token) =>
-      searchableText.includes(token)
-    );
-
-    const tokenRatio = matchedTokens.length / queryTokens.length;
-
-    score = Math.max(score, tokenRatio * 0.82);
+    const searchableText = [productName, productCategory, productBrand, productDescription, ...aliases].join(" ");
+    const matchedTokens = queryTokens.filter((t) => searchableText.includes(t));
+    score = Math.max(score, (matchedTokens.length / queryTokens.length) * 0.82);
   }
 
-  const technicalScore = scoreTechnicalMeasurements(query, [
-    productName,
-    ...aliases
-  ]);
-
+  const technicalScore = scoreTechnicalMeasurements(query, [productName, ...aliases]);
   score = Math.max(score, technicalScore);
 
   return Number(score.toFixed(4));
 }
 
-function scoreTechnicalMeasurements(
-  query: string,
-  candidates: string[]
-): number {
+function scoreTechnicalMeasurements(query: string, candidates: string[]): number {
   const normalizedQuery = normalizeText(query);
-
   const queryNumbers = extractNumbersAndFractions(normalizedQuery);
-
-  if (queryNumbers.length === 0) {
-    return 0;
-  }
+  if (queryNumbers.length === 0) return 0;
 
   let bestScore = 0;
-
   for (const candidate of candidates) {
-    const normalizedCandidate = normalizeText(candidate);
-    const candidateNumbers = extractNumbersAndFractions(normalizedCandidate);
-
-    if (candidateNumbers.length === 0) {
-      continue;
-    }
-
-    const matches = queryNumbers.filter((number) =>
-      candidateNumbers.includes(number)
-    );
-
+    const candidateNumbers = extractNumbersAndFractions(normalizeText(candidate));
+    if (candidateNumbers.length === 0) continue;
+    const matches = queryNumbers.filter((n) => candidateNumbers.includes(n));
     const ratio = matches.length / Math.max(queryNumbers.length, 1);
-
-    if (ratio > 0) {
-      bestScore = Math.max(bestScore, 0.45 + ratio * 0.35);
-    }
+    if (ratio > 0) bestScore = Math.max(bestScore, 0.45 + ratio * 0.35);
   }
-
   return Number(bestScore.toFixed(4));
 }
 
 function extractNumbersAndFractions(value: string): string[] {
   const matches = value.match(/\d+\s*\/\s*\d+|\d+(\.\d+)?/g);
-
-  if (!matches) {
-    return [];
-  }
-
+  if (!matches) return [];
   return matches.map((item) => item.replace(/\s+/g, ""));
 }
 
@@ -258,47 +181,26 @@ export type TechnicalListSearchItem = {
 };
 
 export async function searchTechnicalList(
-  text: string
+  text: string,
+  tenantId: string
 ): Promise<TechnicalListSearchItem[]> {
   const lines = text
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((l) => l.trim())
     .filter(Boolean);
 
   const results: TechnicalListSearchItem[] = [];
-
   for (const line of lines) {
     const parsedLine = parseTechnicalLine(line);
-    const result = await searchProduct(parsedLine.productText);
-
-    results.push({
-      line,
-      quantity: parsedLine.quantity,
-      productText: parsedLine.productText,
-      result
-    });
+    const result = await searchProductForTenant(parsedLine.productText, tenantId);
+    results.push({ line, quantity: parsedLine.quantity, productText: parsedLine.productText, result });
   }
-
   return results;
 }
 
-function parseTechnicalLine(line: string): {
-  quantity: number | null;
-  productText: string;
-} {
+function parseTechnicalLine(line: string): { quantity: number | null; productText: string } {
   const normalized = line.trim();
-
   const match = normalized.match(/^(\d+(?:\.\d+)?)\s+(.+)$/);
-
-  if (!match) {
-    return {
-      quantity: null,
-      productText: normalized
-    };
-  }
-
-  return {
-    quantity: Number(match[1]),
-    productText: match[2].trim()
-  };
+  if (!match) return { quantity: null, productText: normalized };
+  return { quantity: Number(match[1]), productText: match[2].trim() };
 }

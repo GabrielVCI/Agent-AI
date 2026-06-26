@@ -1,0 +1,61 @@
+import type { Request, Response, NextFunction } from "express";
+import { resolveSession } from "../services/auth.service.js";
+import { env } from "../config/env.js";
+import { AppError } from "./error.middleware.js";
+
+export async function requireAuth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const token = req.cookies?.[env.SESSION_COOKIE_NAME];
+
+    // --- [DEBUG-AUTH] temporal (quitar luego: grep "[DEBUG-AUTH]") ---
+    const dbg = env.NODE_ENV !== "production";
+    if (dbg) {
+      console.log("[AUTH MIDDLEWARE] ruta:", req.method, req.originalUrl);
+      console.log("[AUTH MIDDLEWARE] origin:", req.headers.origin ?? "(sin origin)");
+      console.log("[AUTH MIDDLEWARE] header cookie presente:", Boolean(req.headers.cookie));
+      console.log("[AUTH MIDDLEWARE] cookies parseadas:", Object.keys(req.cookies ?? {}));
+      console.log("[AUTH MIDDLEWARE] cookieName esperado:", env.SESSION_COOKIE_NAME, "| token presente:", Boolean(token));
+    }
+
+    if (!token) {
+      if (dbg) console.log("[AUTH MIDDLEWARE] -> 401 motivo: no llegó cookie", env.SESSION_COOKIE_NAME);
+      throw new AppError("No autenticado", 401);
+    }
+
+    const user = await resolveSession(token);
+
+    if (!user) {
+      if (dbg) console.log("[AUTH MIDDLEWARE] -> 401 motivo: sesión no resuelta (no existe/expirada/revocada/usuario disabled)");
+      res.clearCookie(env.SESSION_COOKIE_NAME);
+      throw new AppError("Sesión inválida o expirada", 401);
+    }
+
+    if (dbg) console.log("[AUTH MIDDLEWARE] autenticado: sí | id:", user.id, "| role:", user.role, "| tenantId:", user.tenantId);
+
+    req.user = user;
+    req.tenantId = user.tenantId ?? undefined;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function optionalAuth(
+  req: Request,
+  _res: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = req.cookies?.[env.SESSION_COOKIE_NAME];
+  if (token) {
+    const user = await resolveSession(token);
+    if (user) {
+      req.user = user;
+      req.tenantId = user.tenantId ?? undefined;
+    }
+  }
+  next();
+}

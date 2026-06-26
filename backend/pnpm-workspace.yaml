@@ -1,4 +1,6 @@
 allowBuilds:
   '@prisma/engines': true
   esbuild: true
+  ngrok: true
   prisma: true
+  puppeteer: true

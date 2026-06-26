@@ -8,16 +8,66 @@ datasource db {
   provider = "postgresql"
 }
 
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
 enum AliasType {
   SYNONYM
   TECHNICAL_NAME
   COMMON_MISTAKE
 }
 
-enum ConversationStatus {
+enum TenantStatus {
   ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  OWNER
+  ADMIN
+  AGENT_OPERATOR
+  BILLING
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCEL_REQUESTED
+  CANCELLED
+  TRIALING
+}
+
+enum CancellationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  COMPLETED
+}
+
+enum AgentType {
+  SALES
+  SUPPORT
+  APPOINTMENTS
+  CUSTOM
+}
+
+enum AgentStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ConversationStatus {
+  OPEN
+  BOT_ACTIVE
+  HUMAN_ACTIVE
   CLOSED
-  WAITING_HUMAN
 }
 
 enum MessageDirection {
@@ -30,6 +80,14 @@ enum SenderType {
   AGENT
   HUMAN
   SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  AUDIO
+  IMAGE
+  DOCUMENT
+  TEMPLATE
 }
 
 enum QuoteStatus {
@@ -46,145 +104,296 @@ enum HandoffStatus {
   CANCELLED
 }
 
-model Business {
-  id        String   @id @default(cuid())
-  name      String
-  rnc       String?
-  phone     String?
-  address   String?
-  logoUrl   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
 
-  products      Product[]
-  customers     Customer[]
+enum IntegrationType {
+  WHATSAPP
+  OPENAI
+  PAYMENT
+  STORAGE
+  CUSTOM
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum MetricType {
+  CONVERSATION
+  MESSAGE
+  QUOTE
+  AUDIO_TRANSCRIPTION
+  HUMAN_HANDOFF
+  HUMAN_REPLY
+  AI_REPLY
+  UNANSWERED_CONVERSATION
+  CLOSED_CONVERSATION
+  REOPENED_CONVERSATION
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String       @id @default(cuid())
+  name      String
+  legalName String?
+  rnc       String?
+  logoUrl   String?
+  address   String?
+  phone     String?
+  email     String?
+  industry  String?
+  timezone  String       @default("America/Santo_Domingo")
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  users                User[]
+  agents               Agent[]
+  conversations        Conversation[]
+  quotes               Quote[]
+  customers            Customer[]
+  products             Product[]
+  subscription         Subscription?
+  cancellationRequests CancellationRequest[]
+  integrations         Integration[]
+  knowledgeDocuments   KnowledgeDocument[]
+  usageMetrics         UsageMetric[]
+  idempotencyKeys      IdempotencyKey[]
+
+  @@index([status])
+}
+
+model User {
+  id           String     @id @default(cuid())
+  tenantId     String?
+  name         String
+  email        String     @unique
+  passwordHash String
+  role         UserRole
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  tenant                Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions              Session[]
+  assignedConversations Conversation[]       @relation("AssignedConversations")
+  cancellationRequests  CancellationRequest[]
+
+  @@index([tenantId])
+  @@index([email])
+}
+
+model Session {
+  id               String    @id @default(cuid())
+  userId           String
+  sessionTokenHash String    @unique
+  userAgent        String?
+  ipAddress        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Plan {
+  id                      String   @id @default(cuid())
+  name                    String
+  description             String?
+  maxAgents               Int
+  maxWhatsappNumbers      Int
+  maxMonthlyConversations Int
+  maxMonthlyQuotes        Int
+  maxStorageMb            Int
+  allowRag                Boolean  @default(false)
+  allowAudioTranscription Boolean  @default(false)
+  priceMonthly            Decimal  @db.Decimal(10, 2)
+  currency                String   @default("DOP")
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  tenantId           String             @unique
+  planId             String
+  status             SubscriptionStatus @default(TRIALING)
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelRequestedAt  DateTime?
+  cancelledAt        DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan                 Plan                  @relation(fields: [planId], references: [id])
+  cancellationRequests CancellationRequest[]
+
+  @@index([planId])
+}
+
+model CancellationRequest {
+  id                String             @id @default(cuid())
+  tenantId          String
+  subscriptionId    String
+  requestedByUserId String
+  reason            String
+  status            CancellationStatus @default(PENDING)
+  adminNotes        String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  requestedBy  User         @relation(fields: [requestedByUserId], references: [id])
+
+  @@index([tenantId])
+  @@index([subscriptionId])
+  @@index([status])
+}
+
+model Agent {
+  id                    String      @id @default(cuid())
+  tenantId              String
+  name                  String
+  description           String?
+  type                  AgentType   @default(SALES)
+  status                AgentStatus @default(ACTIVE)
+  systemPrompt          String?
+  tone                  String?
+  department            String?
+  whatsappPhoneNumberId String?
+  whatsappDisplayPhone  String?
+  openAiModel           String      @default("gpt-4.1-mini")
+  allowAudioMessages    Boolean     @default(false)
+  allowHumanHandoff     Boolean     @default(true)
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
   quotes        Quote[]
-  handoffs      HumanHandoff[]
-}
+  usageMetrics  UsageMetric[]
 
-model Product {
-  id          String   @id @default(cuid())
-  businessId  String
-  sku         String
-  name        String
-  category    String?
-  brand       String?
-  description String?
-  unit        String
-  price       Decimal  @db.Decimal(12, 2)
-  stock       Int      @default(0)
-  imageUrl    String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  aliases  ProductAlias[]
-  lines    QuoteLine[]
-
-  @@unique([businessId, sku])
-  @@index([businessId])
-  @@index([name])
-  @@index([category])
-  @@index([brand])
-}
-
-model ProductAlias {
-  id        String    @id @default(cuid())
-  productId String
-  alias     String
-  aliasType AliasType
-  createdAt DateTime  @default(now())
-
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-
-  @@index([alias])
-  @@unique([productId, alias])
+  @@index([tenantId])
+  @@index([whatsappPhoneNumberId])
 }
 
 model Customer {
-  id         String   @id @default(cuid())
-  businessId String
-  name       String?
-  phone      String
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String?
+  phone     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations Conversation[]
   quotes        Quote[]
 
-  @@unique([businessId, phone])
+  @@unique([tenantId, phone])
   @@index([phone])
 }
 
 model Conversation {
-  id             String             @id @default(cuid())
-  businessId     String
-  customerId     String
-  status         ConversationStatus @default(ACTIVE)
-  lastMessageAt  DateTime?
-  metadata       Json?
-  currentQuoteId String?
-  requiresHuman  Boolean            @default(false)
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  id                 String             @id @default(cuid())
+  tenantId           String
+  agentId            String?
+  customerId         String
+  whatsappPhone      String?
+  customerName       String?
+  status             ConversationStatus @default(BOT_ACTIVE)
+  assignedToUserId   String?
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  currentQuoteId     String?
+  metadata           Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent      Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedTo User?          @relation("AssignedConversations", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  messages   Message[]
+  quotes     Quote[]
+  handoffs   HumanHandoff[]
 
-  messages Message[]
-  quotes   Quote[]
-  handoffs HumanHandoff[]
-
-  @@index([businessId])
+  @@index([tenantId])
   @@index([customerId])
+  @@index([agentId])
   @@index([status])
+  @@index([whatsappPhone])
+  @@index([lastMessageAt])
 }
 
 model Message {
-  id             String           @id @default(cuid())
-  conversationId String
-  direction      MessageDirection
-  senderType     SenderType
-  content        String
-  messageId      String?
-  metadata       Json?
-  createdAt      DateTime         @default(now())
+  id                String           @id @default(cuid())
+  tenantId          String
+  conversationId    String
+  direction         MessageDirection
+  senderType        SenderType
+  messageType       MessageType      @default(TEXT)
+  textContent       String?
+  mediaUrl          String?
+  transcriptionText String?
+  whatsappMessageId String?
+  metadata          Json?
+  createdAt         DateTime         @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
+  @@index([tenantId])
   @@index([conversationId])
-  @@index([messageId])
+  @@index([whatsappMessageId])
+  @@index([createdAt])
 }
 
 model Quote {
   id             String      @id @default(cuid())
-  businessId     String
-  customerId     String
+  tenantId       String
   conversationId String?
+  customerId     String
+  agentId        String?
   quoteNumber    String
   status         QuoteStatus @default(DRAFT)
   subtotal       Decimal     @default(0) @db.Decimal(12, 2)
   taxRate        Decimal     @default(0.18) @db.Decimal(5, 4)
   taxAmount      Decimal     @default(0) @db.Decimal(12, 2)
   total          Decimal     @default(0) @db.Decimal(12, 2)
+  currency       String      @default("DOP")
   pdfUrl         String?
   validUntil     DateTime?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  lines        QuoteLine[]
 
-  lines QuoteLine[]
-
-  @@unique([businessId, quoteNumber])
-  @@index([businessId])
+  @@unique([tenantId, quoteNumber])
+  @@index([tenantId])
   @@index([customerId])
   @@index([conversationId])
+  @@index([agentId])
+  @@index([createdAt])
 }
 
 model QuoteLine {
@@ -205,9 +414,49 @@ model QuoteLine {
   @@index([productId])
 }
 
+model Product {
+  id          String   @id @default(cuid())
+  tenantId    String
+  sku         String
+  name        String
+  category    String?
+  brand       String?
+  description String?
+  unit        String
+  price       Decimal  @db.Decimal(12, 2)
+  stock       Int      @default(0)
+  imageUrl    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  aliases ProductAlias[]
+  lines   QuoteLine[]
+
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+  @@index([name])
+  @@index([category])
+  @@index([brand])
+}
+
+model ProductAlias {
+  id        String    @id @default(cuid())
+  productId String
+  alias     String
+  aliasType AliasType
+  createdAt DateTime  @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([alias])
+  @@unique([productId, alias])
+}
+
 model HumanHandoff {
   id             String        @id @default(cuid())
-  businessId     String
+  tenantId       String
   conversationId String
   reason         String
   status         HandoffStatus @default(OPEN)
@@ -215,16 +464,17 @@ model HumanHandoff {
   createdAt      DateTime      @default(now())
   resolvedAt     DateTime?
 
-  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  @@index([businessId])
+  @@index([tenantId])
   @@index([conversationId])
   @@index([status])
 }
 
 model AgentLog {
   id             String   @id @default(cuid())
+  tenantId       String?
+  agentId        String?
   conversationId String?
   input          String
   output         Json?
@@ -233,6 +483,92 @@ model AgentLog {
   requiresHuman  Boolean  @default(false)
   createdAt      DateTime @default(now())
 
+  @@index([tenantId])
   @@index([conversationId])
   @@index([intent])
+}
+
+model KnowledgeDocument {
+  id               String         @id @default(cuid())
+  tenantId         String
+  uploadedByUserId String?
+  title            String
+  fileName         String
+  fileType         String
+  fileUrl          String
+  status           DocumentStatus @default(UPLOADED)
+  metadata         Json?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks KnowledgeChunk[]
+
+  @@index([tenantId])
+}
+
+model KnowledgeChunk {
+  id         String   @id @default(cuid())
+  tenantId   String
+  documentId String
+  content    String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([documentId])
+}
+
+model Integration {
+  id              String            @id @default(cuid())
+  tenantId        String
+  type            IntegrationType
+  name            String
+  status          IntegrationStatus @default(ACTIVE)
+  encryptedConfig Json?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([type])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(cuid())
+  tenantId     String?
+  key          String
+  scope        String
+  requestHash  String?
+  responseBody Json?
+  statusCode   Int?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([key, scope])
+  @@index([tenantId])
+  @@index([expiresAt])
+}
+
+model UsageMetric {
+  id         String     @id @default(cuid())
+  tenantId   String
+  agentId    String?
+  metricType MetricType
+  quantity   Int        @default(1)
+  metadata   Json?
+  createdAt  DateTime   @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent  Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([agentId])
+  @@index([metricType])
+  @@index([createdAt])
 }
