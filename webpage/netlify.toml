@@ -1,0 +1,11 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# SPA fallback: todas las rutas del cliente (React Router) sirven index.html.
+# Se excluyen las funciones serverless para que /.netlify/functions/* funcione.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
