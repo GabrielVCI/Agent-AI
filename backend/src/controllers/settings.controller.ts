@@ -8,10 +8,13 @@ import {
   deleteKnowledgeDocument,
   createIntegrationSchema,
   updateIntegrationSchema,
+  getTenantTraining,
+  updateTenantTraining,
+  trainingConfigSchema,
 } from "../services/settings.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
-import { getAgent } from "../services/agents-crud.service.js";
-import { updateAgent, updateAgentSchema } from "../services/agents-crud.service.js";
+import { env } from "../config/env.js";
+import { logger } from "../config/logger.js";
 
 export async function listIntegrationsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -85,40 +88,32 @@ export async function deleteKnowledgeDocController(req: Request, res: Response, 
 
 export async function getAgentTrainingController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    // SUPER_ADMIN sin tenant seleccionado no tiene contexto de negocio que cargar.
     if (!req.tenantId) throw new AppError("Empresa no identificada", 403);
-    const agentId = req.query.agentId as string | undefined;
-    if (!agentId) {
-      res.status(400).json({ success: false, message: "agentId requerido como query param" });
-      return;
+    if (env.NODE_ENV === "development") logger.info("[AGENT TRAINING] loading config");
+
+    const data = await getTenantTraining(req.tenantId);
+
+    if (env.NODE_ENV === "development") {
+      logger.info(`[AGENT TRAINING] config loaded for tenant ${req.tenantId}`);
     }
-    const agent = await getAgent(agentId, req.tenantId);
-    res.json({
-      success: true,
-      data: {
-        agentId: agent.id,
-        systemPrompt: agent.basePrompt,
-        tone: agent.tone,
-        openAiModel: agent.aiModel,
-        allowHumanHandoff: agent.allowHumanIntervention,
-      },
-    });
+    res.json({ success: true, data });
   } catch (err) { next(err); }
 }
 
 export async function updateAgentTrainingController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.tenantId) throw new AppError("Empresa no identificada", 403);
-    const agentId = req.query.agentId as string | undefined;
-    if (!agentId) {
-      res.status(400).json({ success: false, message: "agentId requerido como query param" });
-      return;
-    }
-    const parsed = updateAgentSchema.safeParse(req.body);
+
+    const parsed = trainingConfigSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, errors: parsed.error.flatten().fieldErrors });
       return;
     }
-    const agent = await updateAgent(agentId, req.tenantId, parsed.data);
-    res.json({ success: true, data: agent });
+
+    if (env.NODE_ENV === "development") logger.info("[AGENT TRAINING] saving config");
+
+    const data = await updateTenantTraining(req.tenantId, parsed.data);
+    res.json({ success: true, data });
   } catch (err) { next(err); }
 }

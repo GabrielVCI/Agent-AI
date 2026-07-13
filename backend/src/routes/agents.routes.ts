@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middlewares/auth.middleware.js";
 import { requireRole, requireTenantAccess } from "../middlewares/roles.middleware.js";
 import { checkPlanLimit } from "../middlewares/plan-limits.middleware.js";
+import { aiRateLimit } from "../middlewares/rate-limit.middleware.js";
 import {
   listAgentsController,
   getAgentController,
@@ -32,6 +33,8 @@ agentsRoutes.patch(
 );
 agentsRoutes.post(
   "/:id/test",
+  // Dispara OpenAI real: límite propio por usuario/tenant
+  aiRateLimit,
   requireRole("OWNER", "ADMIN", "AGENT_OPERATOR"),
   testAgentController
 );

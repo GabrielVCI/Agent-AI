@@ -13,7 +13,19 @@ import {
   processCancellationRequest,
   createTenantSchema,
   assignPlanSchema,
+  updateTenantSchema,
+  updateSubscriptionSchema,
+  updateTenantInfo,
+  updateTenantSubscription,
+  resetTenantUsage,
 } from "../services/admin.service.js";
+import {
+  getVoiceSettings,
+  updateVoiceSettings,
+  getTenantVoiceEntitlement,
+  listCalls,
+  resetVoiceUsage,
+} from "../services/voice.service.js";
 
 const createUserSchema = z.object({
   name: z.string().min(1),
@@ -45,8 +57,91 @@ export async function createTenantController(req: Request, res: Response, next: 
       res.status(400).json({ success: false, message: "Datos inválidos", errors: parsed.error.flatten().fieldErrors });
       return;
     }
-    const result = await createTenantWithOwner(parsed.data);
+    const result = await createTenantWithOwner(parsed.data, req.user?.id);
     res.status(201).json({ success: true, data: result });
+  } catch (err) { next(err); }
+}
+
+export async function updateTenantController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = updateTenantSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Datos inválidos", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    const tenant = await updateTenantInfo(req.params.id, parsed.data);
+    res.json({ success: true, data: tenant });
+  } catch (err) { next(err); }
+}
+
+export async function updateSubscriptionController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = updateSubscriptionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Datos inválidos", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    const subscription = await updateTenantSubscription(req.params.id, parsed.data);
+    res.json({ success: true, data: subscription });
+  } catch (err) { next(err); }
+}
+
+export async function resetUsageController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await resetTenantUsage(req.params.id);
+    res.json({ success: true, data: result, message: "Uso del mes reseteado" });
+  } catch (err) { next(err); }
+}
+
+// ─── Voz (llamadas IA) ───────────────────────────────────────────────────────
+
+export async function getTenantVoiceController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.params.id;
+    const [settings, entitlement, calls] = await Promise.all([
+      getVoiceSettings(tenantId),
+      getTenantVoiceEntitlement(tenantId),
+      listCalls(tenantId, 10),
+    ]);
+    res.json({ success: true, data: { settings, entitlement, recentCalls: calls } });
+  } catch (err) { next(err); }
+}
+
+const voiceSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  monthlyMinutesLimit: z.coerce.number().int().min(0).nullish(),
+  minutesPerUser: z.coerce.number().int().min(1).max(10000).optional(),
+  allowedAgentIds: z.array(z.string()).nullish(),
+});
+
+export async function updateTenantVoiceController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = voiceSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Datos inválidos", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    const settings = await updateVoiceSettings(req.params.id, {
+      ...(parsed.data.enabled !== undefined ? { enabled: parsed.data.enabled } : {}),
+      ...(parsed.data.monthlyMinutesLimit !== undefined
+        ? { monthlyMinutesLimit: parsed.data.monthlyMinutesLimit }
+        : {}),
+      ...(parsed.data.minutesPerUser !== undefined
+        ? { minutesPerUser: parsed.data.minutesPerUser }
+        : {}),
+      ...(parsed.data.allowedAgentIds !== undefined
+        ? { allowedAgentIds: parsed.data.allowedAgentIds }
+        : {}),
+    });
+    const entitlement = await getTenantVoiceEntitlement(req.params.id);
+    res.json({ success: true, data: { settings, entitlement } });
+  } catch (err) { next(err); }
+}
+
+export async function resetTenantVoiceUsageController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await resetVoiceUsage(req.params.id);
+    res.json({ success: true, data: result, message: "Uso de voz del mes reseteado" });
   } catch (err) { next(err); }
 }
 
@@ -78,7 +173,10 @@ export async function assignPlanController(req: Request, res: Response, next: Ne
       res.status(400).json({ success: false, errors: parsed.error.flatten().fieldErrors });
       return;
     }
-    const sub = await assignPlanToTenant(req.params.id, parsed.data.planId);
+    const sub = await assignPlanToTenant(req.params.id, parsed.data.planId, {
+      customMonthlyMessageLimit: parsed.data.customMonthlyMessageLimit,
+      customMonthlyTokenLimit: parsed.data.customMonthlyTokenLimit,
+    });
     res.json({ success: true, data: sub });
   } catch (err) { next(err); }
 }

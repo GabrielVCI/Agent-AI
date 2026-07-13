@@ -11,6 +11,14 @@ import { dashboardRoutes } from "./dashboard.routes.js";
 import { adminRoutes } from "./admin.routes.js";
 import { accountRoutes } from "./account.routes.js";
 import { settingsRoutes } from "./settings.routes.js";
+import { catalogRoutes } from "./catalog.routes.js";
+import { onboardingRoutes } from "./onboarding.routes.js";
+import { appointmentRoutes } from "./appointment.routes.js";
+import { knowledgeRoutes } from "./knowledge.routes.js";
+import { billingRoutes } from "./billing.routes.js";
+import { voiceRoutes } from "./voice.routes.js";
+import { integrationsRoutes } from "./integrations.routes.js";
+import { supportRoutes } from "./support.routes.js";
 
 export const router = Router();
 
@@ -29,6 +37,14 @@ router.use("/api/conversations", conversationRoutes);
 router.use("/api/dashboard", dashboardRoutes);
 router.use("/api/settings", settingsRoutes);
 router.use("/api/account", accountRoutes);
+router.use("/api/catalog", catalogRoutes);
+router.use("/api/onboarding", onboardingRoutes);
+router.use("/api/appointments", appointmentRoutes);
+router.use("/api/knowledge", knowledgeRoutes);
+router.use("/api/billing", billingRoutes);
+router.use("/api/voice", voiceRoutes);
+router.use("/api/integrations", integrationsRoutes);
+router.use("/api/support", supportRoutes);
 
 // SUPER_ADMIN only
 router.use("/api/admin", adminRoutes);

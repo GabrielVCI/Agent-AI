@@ -41,6 +41,44 @@ export async function sendWhatsappTextMessage(input: {
   return response.data;
 }
 
+/**
+ * Descarga un media entrante (audio/imagen/documento) desde la Graph API.
+ * Flujo de Meta en dos pasos: GET /{mediaId} devuelve una URL temporal
+ * (expira en ~5 min, requiere el Bearer token) y luego se descarga el binario.
+ * La URL temporal NUNCA se persiste ni se expone al frontend.
+ */
+export async function downloadWhatsappMedia(mediaId: string): Promise<{
+  buffer: Buffer;
+  mimeType: string;
+  fileSize: number | null;
+}> {
+  const token = getToken();
+
+  const metaRes = await axios.get(
+    `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${mediaId}`,
+    { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+  );
+  const { url, mime_type: mimeType, file_size: fileSize } = metaRes.data as {
+    url: string;
+    mime_type?: string;
+    file_size?: number;
+  };
+  if (!url) throw new Error(`Meta no devolvió URL para el media ${mediaId}`);
+
+  const binRes = await axios.get<ArrayBuffer>(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: "arraybuffer",
+    timeout: 30000,
+    maxContentLength: 25 * 1024 * 1024,
+  });
+
+  return {
+    buffer: Buffer.from(binRes.data),
+    mimeType: mimeType ?? "audio/ogg",
+    fileSize: fileSize ?? null,
+  };
+}
+
 export async function uploadWhatsappDocumentMedia(input: {
   filePath: string;
   phoneNumberId?: string;

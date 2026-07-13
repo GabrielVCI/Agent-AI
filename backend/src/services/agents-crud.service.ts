@@ -34,6 +34,8 @@ export const createAgentSchema = z.object({
   aiModel: z.string().optional(),
   allowAudio: z.boolean().optional(),
   allowHumanIntervention: z.boolean().optional(),
+  allowVoiceCalls: z.boolean().optional(),
+  elevenLabsAgentId: z.string().max(80).nullish(),
 });
 
 export const updateAgentSchema = createAgentSchema.partial();
@@ -69,6 +71,8 @@ type AgentWriteData = Partial<
     | "openAiModel"
     | "allowAudioMessages"
     | "allowHumanHandoff"
+    | "allowVoiceCalls"
+    | "elevenLabsAgentId"
   >
 >;
 
@@ -88,6 +92,9 @@ function toPrismaData(dto: UpdateAgentDto): AgentWriteData {
   if (dto.aiModel !== undefined) data.openAiModel = dto.aiModel;
   if (dto.allowAudio !== undefined) data.allowAudioMessages = dto.allowAudio;
   if (dto.allowHumanIntervention !== undefined) data.allowHumanHandoff = dto.allowHumanIntervention;
+  if (dto.allowVoiceCalls !== undefined) data.allowVoiceCalls = dto.allowVoiceCalls;
+  if (dto.elevenLabsAgentId !== undefined)
+    data.elevenLabsAgentId = dto.elevenLabsAgentId?.trim() || null;
 
   return data;
 }
@@ -108,6 +115,8 @@ export function serializeAgent(agent: AgentRecord, stats?: AgentStats) {
     aiModel: agent.openAiModel,
     allowAudio: agent.allowAudioMessages,
     allowHumanIntervention: agent.allowHumanHandoff,
+    allowVoiceCalls: agent.allowVoiceCalls,
+    elevenLabsAgentId: agent.elevenLabsAgentId ?? undefined,
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
     ...(stats ? { stats } : {}),

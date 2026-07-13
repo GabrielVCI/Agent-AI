@@ -1,8 +1,10 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { encryptJson, decryptJson } from "../lib/crypto.js";
 import type { IntegrationType } from "@prisma/client";
+import { trainingConfigSchema, type TrainingConfig } from "../types/training.types.js";
 
 export const createIntegrationSchema = z.object({
   type: z.enum(["WHATSAPP", "OPENAI", "PAYMENT", "STORAGE", "CUSTOM"]),
@@ -101,4 +103,35 @@ export async function deleteKnowledgeDocument(docId: string, tenantId: string) {
   if (!doc) throw new AppError("Documento no encontrado", 404);
 
   await prisma.knowledgeDocument.delete({ where: { id: docId } });
+}
+
+// --- Entrenamiento / contexto del negocio (per-tenant) ---
+
+export { trainingConfigSchema };
+
+/** Devuelve el contexto de entrenamiento del tenant (o {} si no hay/está corrupto). */
+export async function getTenantTraining(tenantId: string): Promise<TrainingConfig> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { trainingConfig: true },
+  });
+
+  const raw = tenant?.trainingConfig;
+  if (!raw || typeof raw !== "object") return {};
+
+  // Validamos de forma tolerante: si el JSON guardado no cuadra, devolvemos {}.
+  const parsed = trainingConfigSchema.safeParse(raw);
+  return parsed.success ? parsed.data : {};
+}
+
+/** Persiste el contexto de entrenamiento del tenant (ya validado por el controller). */
+export async function updateTenantTraining(
+  tenantId: string,
+  data: TrainingConfig
+): Promise<TrainingConfig> {
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: { trainingConfig: data as Prisma.InputJsonValue },
+  });
+  return data;
 }

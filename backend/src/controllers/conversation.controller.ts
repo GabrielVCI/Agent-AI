@@ -7,16 +7,31 @@ import {
   releaseConversationToAgent,
   closeConversation,
   saveHumanMessage,
+  updateConversationLastMessage,
 } from "../services/conversation.service.js";
 import {
   sendWhatsappTextMessage,
 } from "../services/meta-whatsapp.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { logger } from "../config/logger.js";
+import { bumpUsage } from "../services/billing.service.js";
 
 const paginationSchema = z.object({
   page: z.coerce.number().min(1).default(1),
   limit: z.coerce.number().min(1).max(100).default(20),
   status: z.enum(["OPEN", "BOT_ACTIVE", "HUMAN_ACTIVE", "CLOSED"]).optional(),
+  agentId: z.string().optional(),
+  search: z.string().optional(),
+  /** true => solo conversaciones con handoff humano abierto (pendientes de atención) */
+  pendingHuman: z.coerce.boolean().optional(),
+  /** true => solo conversaciones asignadas al usuario autenticado */
+  assignedToMe: z.coerce.boolean().optional(),
+  /** true => solo conversaciones sin usuario asignado */
+  unassigned: z.coerce.boolean().optional(),
+  /** filtrar por etiqueta */
+  labelId: z.string().optional(),
+  /** true => el último mensaje es del cliente y nadie ha respondido (por responder) */
+  awaiting: z.coerce.boolean().optional(),
 });
 
 const replySchema = z.object({
@@ -41,12 +56,43 @@ export async function listConversationsController(
       return;
     }
 
-    const { page, limit, status } = parsed.data;
+    const { page, limit, status, agentId, search, pendingHuman, assignedToMe, unassigned, labelId, awaiting } =
+      parsed.data;
     const skip = (page - 1) * limit;
 
     const where = {
       tenantId: req.tenantId,
       ...(status ? { status } : {}),
+      ...(agentId ? { agentId } : {}),
+      ...(assignedToMe && req.user ? { assignedToUserId: req.user.id } : {}),
+      ...(unassigned ? { assignedToUserId: null } : {}),
+      ...(labelId ? { labels: { some: { labelId } } } : {}),
+      // "Por responder": el cliente escribió y nadie (IA ni humano) respondió aún.
+      // Va en AND para no chocar con el OR de `search`.
+      ...(awaiting
+        ? {
+            lastInboundAt: { not: null },
+            AND: [
+              {
+                OR: [
+                  { lastOutboundAt: null },
+                  { lastOutboundAt: { lt: prisma.conversation.fields.lastInboundAt } },
+                ],
+              },
+            ],
+          }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              { customerName: { contains: search, mode: "insensitive" as const } },
+              { whatsappPhone: { contains: search, mode: "insensitive" as const } },
+              { customer: { is: { phone: { contains: search, mode: "insensitive" as const } } } },
+              { customer: { is: { name: { contains: search, mode: "insensitive" as const } } } },
+            ],
+          }
+        : {}),
+      ...(pendingHuman ? { handoffs: { some: { status: "OPEN" as const } } } : {}),
     };
 
     const [conversations, total] = await Promise.all([
@@ -55,6 +101,9 @@ export async function listConversationsController(
         include: {
           customer: true,
           agent: { select: { id: true, name: true } },
+          assignedTo: { select: { id: true, name: true } },
+          labels: { include: { label: { select: { id: true, name: true, color: true } } } },
+          handoffs: { where: { status: "OPEN" }, select: { id: true }, take: 1 },
           messages: {
             orderBy: { createdAt: "desc" },
             take: 1,
@@ -77,12 +126,21 @@ export async function listConversationsController(
       data: conversations.map((c) => ({
         id: c.id,
         status: c.status,
+        channel: c.channel,
         whatsappPhone: c.whatsappPhone,
         customerName: c.customerName,
         lastMessageAt: c.lastMessageAt,
         lastMessagePreview: c.lastMessagePreview,
         customer: { id: c.customer.id, name: c.customer.name, phone: c.customer.phone },
         agent: c.agent,
+        assignedTo: c.assignedTo,
+        labels: c.labels.map((a) => a.label),
+        needsHuman: c.handoffs.length > 0,
+        awaitingReply: Boolean(
+          c.lastInboundAt && (!c.lastOutboundAt || c.lastOutboundAt < c.lastInboundAt)
+        ),
+        lastInboundAt: c.lastInboundAt,
+        lastOutboundAt: c.lastOutboundAt,
         lastMessage: c.messages[0] ?? null,
         currentQuote: c.quotes[0]
           ? { ...c.quotes[0], total: Number(c.quotes[0].total.toString()) }
@@ -144,7 +202,22 @@ export async function getConversationMessagesController(
     }
 
     const messages = await getConversationHistory(conversation.id);
-    res.json({ success: true, data: messages });
+    // Estado de transcripción de audios (vive en metadata) expuesto plano para
+    // el panel. mediaUrl nunca lleva URLs temporales de Meta (no se persisten).
+    const data = messages.map((m) => {
+      const meta =
+        m.metadata && typeof m.metadata === "object" && !Array.isArray(m.metadata)
+          ? (m.metadata as Record<string, unknown>)
+          : {};
+      return {
+        ...m,
+        transcriptionStatus:
+          typeof meta.transcriptionStatus === "string" ? meta.transcriptionStatus : undefined,
+        transcriptionProvider:
+          typeof meta.transcriptionProvider === "string" ? meta.transcriptionProvider : undefined,
+      };
+    });
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }
@@ -220,10 +293,27 @@ export async function replyToConversationController(
       return;
     }
 
-    await saveHumanMessage({
+    if (conversation.status === "CLOSED") {
+      res.status(409).json({
+        success: false,
+        message: "La conversación está cerrada. Usa «Tomar» para reabrirla y responder.",
+      });
+      return;
+    }
+
+    const savedMessage = await saveHumanMessage({
       tenantId: req.tenantId,
       conversationId: conversation.id,
       textContent: parsed.data.message,
+    });
+
+    // La respuesta manual cuenta como mensaje procesado del plan
+    await bumpUsage(req.tenantId, { outboundMessages: 1 });
+
+    // La respuesta manual también debe reflejarse en la lista de conversaciones.
+    await updateConversationLastMessage({
+      conversationId: conversation.id,
+      preview: parsed.data.message.slice(0, 120),
     });
 
     // Send via WhatsApp if we have the phone and a phoneNumberId
@@ -232,10 +322,16 @@ export async function replyToConversationController(
         to: conversation.whatsappPhone,
         text: parsed.data.message,
         phoneNumberId: conversation.agent.whatsappPhoneNumberId,
-      }).catch((err) => console.error("Error sending WhatsApp reply:", err));
+      }).catch((err) =>
+        logger.error(
+          `[CONVERSATIONS] error sending manual reply via WhatsApp: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
+      );
     }
 
-    res.json({ success: true, message: "Mensaje enviado" });
+    res.json({ success: true, data: savedMessage, message: "Mensaje enviado" });
   } catch (err) {
     next(err);
   }

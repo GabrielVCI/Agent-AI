@@ -44,3 +44,23 @@ export async function updateCompanyController(
     next(err);
   }
 }
+
+/** Usuarios activos del tenant (para el selector "Asignar a" del inbox). */
+export async function listCompanyUsersController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    if (!req.tenantId) throw new AppError("Empresa no identificada", 403);
+    const { prisma } = await import("../config/prisma.js");
+    const users = await prisma.user.findMany({
+      where: { tenantId: req.tenantId, status: { not: "DISABLED" } },
+      select: { id: true, name: true, lastName: true, role: true },
+      orderBy: { name: "asc" },
+    });
+    res.json({ success: true, data: users });
+  } catch (err) {
+    next(err);
+  }
+}

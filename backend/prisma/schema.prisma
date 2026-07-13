@@ -36,12 +36,46 @@ enum UserStatus {
   DISABLED
 }
 
+enum ConversationChannel {
+  WHATSAPP
+  VOICE
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  STARTED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// Cómo se cobra la suscripción: venta manual (transferencia/acuerdo),
+// LemonSqueezy (checkout online), gratis, o acuerdo custom.
+enum BillingMode {
+  MANUAL
+  LEMONSQUEEZY
+  FREE
+  CUSTOM
+}
+
+enum PaymentStatus {
+  NOT_REQUIRED
+  PENDING
+  PAID
+  OVERDUE
+}
+
 enum SubscriptionStatus {
   ACTIVE
   PAST_DUE
   CANCEL_REQUESTED
   CANCELLED
   TRIALING
+  EXPIRED
 }
 
 enum CancellationStatus {
@@ -49,6 +83,45 @@ enum CancellationStatus {
   APPROVED
   REJECTED
   COMPLETED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  RESCHEDULED
+  NO_SHOW
+  COMPLETED
+}
+
+enum AppointmentConfirmation {
+  UNCONFIRMED
+  CONFIRMED
+  DECLINED
+}
+
+enum AppointmentPriority {
+  LOW
+  NORMAL
+  HIGH
+  FOLLOW_UP
+}
+
+enum AppointmentSource {
+  AI
+  MANUAL
+  WHATSAPP
+  ADMIN
+}
+
+enum CatalogItemType {
+  PRODUCT
+  SERVICE
+}
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
 }
 
 enum AgentType {
@@ -117,6 +190,9 @@ enum IntegrationType {
   PAYMENT
   STORAGE
   CUSTOM
+  // Herramientas externas de agenda (Excel local hoy; Graph/Sheets en el futuro)
+  EXCEL
+  GOOGLE_SHEETS
 }
 
 enum IntegrationStatus {
@@ -152,6 +228,21 @@ model Tenant {
   industry  String?
   timezone  String       @default("America/Santo_Domingo")
   status    TenantStatus @default(ACTIVE)
+  // Contexto de entrenamiento del negocio (servicios, horarios, políticas,
+  // FAQs, mensajes...). Estructurado en JSON; ver types/training.types.ts.
+  trainingConfig Json?
+  // Respuestas del onboarding post-registro (mensajes/mes, objetivo, etc.).
+  onboarding            Json?
+  onboardingCompletedAt DateTime?
+  // Config de citas/recordatorios: { reminderEnabled, reminderHoursBefore,
+  // reminderMessageTemplate, autoConfirmAI }
+  appointmentSettings Json?
+  // Notas comerciales internas del SUPER_ADMIN (el tenant nunca las ve)
+  internalNotes    String?
+  createdByAdminId String?
+  // Config de llamadas IA: { enabled, minutesPerUser, monthlyMinutesLimit,
+  // allowedAgentIds, businessPhoneNumbers } — ver voice.service.ts
+  voiceSettings Json?
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -167,6 +258,11 @@ model Tenant {
   knowledgeDocuments   KnowledgeDocument[]
   usageMetrics         UsageMetric[]
   idempotencyKeys      IdempotencyKey[]
+  categories           Category[]
+  appointments         Appointment[]
+  usageCounters        UsageCounter[]
+  voiceUsageCounters   VoiceUsageCounter[]
+  callLogs             CallLog[]
 
   @@index([status])
 }
@@ -175,8 +271,12 @@ model User {
   id           String     @id @default(cuid())
   tenantId     String?
   name         String
+  lastName     String?
   email        String     @unique
-  passwordHash String
+  // Opcional: usuarios creados vía Google OAuth no tienen contraseña local.
+  passwordHash String?
+  googleId     String?    @unique
+  authProvider AuthProvider @default(LOCAL)
   role         UserRole
   status       UserStatus @default(ACTIVE)
   lastLoginAt  DateTime?
@@ -187,9 +287,28 @@ model User {
   sessions              Session[]
   assignedConversations Conversation[]       @relation("AssignedConversations")
   cancellationRequests  CancellationRequest[]
+  callLogs              CallLog[]
+  passwordResetTokens   PasswordResetToken[]
 
   @@index([tenantId])
   @@index([email])
+}
+
+// Tokens de recuperación de contraseña: solo se guarda el hash (sha256),
+// expiran y son de un solo uso (usedAt). El token plano viaja únicamente
+// en el link que recibe el usuario.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Session {
@@ -210,18 +329,34 @@ model Session {
 
 model Plan {
   id                      String   @id @default(cuid())
+  // Código comercial estable (BASIC/PRO/ENTERPRISE); null en planes legados.
+  code                    String?  @unique
   name                    String
   description             String?
   maxAgents               Int
+  maxUsers                Int?
   maxWhatsappNumbers      Int
   maxMonthlyConversations Int
   maxMonthlyQuotes        Int
   maxStorageMb            Int
+  // Cuota comercial principal: mensajes procesados por mes (in + out).
+  monthlyMessageLimit     Int      @default(3000)
+  // Límite técnico opcional de tokens OpenAI (protección de costos).
+  monthlyTokenLimit       Int?
   allowRag                Boolean  @default(false)
   allowAudioTranscription Boolean  @default(false)
   priceMonthly            Decimal  @db.Decimal(10, 2)
   currency                String   @default("DOP")
+  // Datos comerciales visibles en las cards de planes
+  setupFee                Decimal? @db.Decimal(10, 2)
+  setupFeeLabel           String?
+  estimatedMessagesMin    Int?
+  featuresJson            Json?
+  isPopular               Boolean  @default(false)
+  sortOrder               Int      @default(0)
   isActive                Boolean  @default(true)
+  lemonSqueezyVariantId   String?
+  lemonSqueezyProductId   String?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
@@ -237,6 +372,28 @@ model Subscription {
   currentPeriodEnd   DateTime
   cancelRequestedAt  DateTime?
   cancelledAt        DateTime?
+  // ── Venta manual / plan personalizado (SUPER_ADMIN) ──
+  billingMode   BillingMode   @default(MANUAL)
+  paymentStatus PaymentStatus @default(NOT_REQUIRED)
+  // Nombre comercial visible cuando el plan es negociado ("Plan personalizado")
+  customPlanName    String?
+  customMonthlyPrice Decimal? @db.Decimal(10, 2)
+  customSetupFee     Decimal? @db.Decimal(10, 2)
+  nextBillingDate    DateTime?
+  // Overrides por tenant (negociados); null usa el valor del plan
+  customMonthlyMessageLimit Int?
+  customMonthlyTokenLimit   Int?
+  customMaxUsers            Int?
+  customMaxAgents           Int?
+  customMaxWhatsappNumbers  Int?
+  // Minutos de llamadas IA negociados (Enterprise); null usa usuarios × cuota
+  customVoiceMinutesLimit   Int?
+  // Identificadores de LemonSqueezy (se llenan vía webhook; nunca datos de tarjeta)
+  lemonSqueezyCustomerId     String?
+  lemonSqueezySubscriptionId String?   @unique
+  lemonSqueezyOrderId        String?
+  renewsAt                   DateTime?
+  endsAt                     DateTime?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -282,6 +439,10 @@ model Agent {
   openAiModel           String      @default("gpt-4.1-mini")
   allowAudioMessages    Boolean     @default(false)
   allowHumanHandoff     Boolean     @default(true)
+  // Puede contestar llamadas IA (solo efectivo con entitlement de voz del tenant)
+  allowVoiceCalls       Boolean     @default(false)
+  // Agente de ElevenLabs Conversational AI vinculado (mapea el webhook post-call)
+  elevenLabsAgentId     String?     @unique
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
@@ -289,6 +450,8 @@ model Agent {
   conversations Conversation[]
   quotes        Quote[]
   usageMetrics  UsageMetric[]
+  appointments  Appointment[]
+  callLogs      CallLog[]
 
   @@index([tenantId])
   @@index([whatsappPhoneNumberId])
@@ -299,6 +462,10 @@ model Customer {
   tenantId  String
   name      String?
   phone     String
+  email     String?
+  // Notas internas del equipo sobre el contacto (no visibles para el cliente)
+  notes     String?
+  lastActivityAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -317,10 +484,14 @@ model Conversation {
   customerId         String
   whatsappPhone      String?
   customerName       String?
+  // Canal de origen: default WHATSAPP preserva todo lo existente
+  channel            ConversationChannel @default(WHATSAPP)
   status             ConversationStatus @default(BOT_ACTIVE)
   assignedToUserId   String?
   lastMessageAt      DateTime?
   lastMessagePreview String?
+  lastInboundAt      DateTime?
+  lastOutboundAt     DateTime?
   currentQuoteId     String?
   metadata           Json?
   createdAt          DateTime           @default(now())
@@ -330,9 +501,12 @@ model Conversation {
   agent      Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
   customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
   assignedTo User?          @relation("AssignedConversations", fields: [assignedToUserId], references: [id], onDelete: SetNull)
-  messages   Message[]
-  quotes     Quote[]
-  handoffs   HumanHandoff[]
+  messages     Message[]
+  quotes       Quote[]
+  handoffs     HumanHandoff[]
+  appointments Appointment[]
+  labels       ConversationLabelAssignment[]
+  callLogs     CallLog[]
 
   @@index([tenantId])
   @@index([customerId])
@@ -417,28 +591,54 @@ model QuoteLine {
 model Product {
   id          String   @id @default(cuid())
   tenantId    String
-  sku         String
+  sku         String?
   name        String
+  // Texto libre legado; la referencia estructurada es categoryId/categoryRef.
   category    String?
+  categoryId  String?
+  itemType    CatalogItemType @default(PRODUCT)
   brand       String?
   description String?
-  unit        String
+  unit        String   @default("unidad")
   price       Decimal  @db.Decimal(12, 2)
-  stock       Int      @default(0)
+  // ITBIS aplicado al ítem (0.18 = 18%). taxable=false para exentos.
+  taxRate          Decimal @default(0.18) @db.Decimal(5, 4)
+  priceIncludesTax Boolean @default(false)
+  // Cantidad disponible; null para servicios (no manejan stock).
+  stock       Int?     @default(0)
   imageUrl    String?
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  aliases ProductAlias[]
-  lines   QuoteLine[]
+  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryRef  Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  aliases      ProductAlias[]
+  lines        QuoteLine[]
+  appointments Appointment[]
 
   @@unique([tenantId, sku])
   @@index([tenantId])
   @@index([name])
   @@index([category])
+  @@index([categoryId])
   @@index([brand])
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
 }
 
 model ProductAlias {
@@ -452,6 +652,72 @@ model ProductAlias {
 
   @@index([alias])
   @@unique([productId, alias])
+}
+
+model Appointment {
+  id             String  @id @default(cuid())
+  tenantId       String
+  agentId        String?
+  conversationId String?
+  customerName   String
+  customerPhone  String
+  customerEmail  String?
+  requestedAt    DateTime @default(now())
+  scheduledAt    DateTime
+  serviceOrProduct String
+  catalogItemId  String?
+  notes          String?
+  source             AppointmentSource       @default(MANUAL)
+  status             AppointmentStatus       @default(PENDING)
+  confirmationStatus AppointmentConfirmation @default(UNCONFIRMED)
+  priority           AppointmentPriority     @default(NORMAL)
+  // Override por cita: { hoursBefore, enabled }; null usa la config del tenant.
+  reminderConfig Json?
+  lastReminderAt DateTime?
+  confirmedAt    DateTime?
+  cancelledAt    DateTime?
+  rescheduledAt  DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  catalogItem  Product?      @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@index([customerPhone])
+  @@index([conversationId])
+}
+
+// Etiquetas de conversación (a nivel conversación y no contacto: el mismo
+// cliente puede tener una conversación de "Cotización" y otra de "Soporte").
+model ConversationLabel {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  color     String   @default("slate")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments ConversationLabelAssignment[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model ConversationLabelAssignment {
+  conversationId String
+  labelId        String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  label        ConversationLabel @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, labelId])
+  @@index([labelId])
 }
 
 model HumanHandoff {
@@ -555,6 +821,82 @@ model IdempotencyKey {
   @@index([expiresAt])
 }
 
+// Contador mensual de minutos de llamadas IA (espejo de UsageCounter para voz).
+// includedMinutes/extraMinutes NO se persisten: se calculan al leer contra el
+// límite vigente (que puede cambiar a mitad de mes).
+model VoiceUsageCounter {
+  id          String   @id @default(cuid())
+  tenantId    String
+  periodStart DateTime
+  periodEnd   DateTime
+  usedSeconds Int      @default(0)
+  callCount   Int      @default(0)
+  estimatedCostUsd Decimal @default(0) @db.Decimal(10, 4)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, periodStart])
+  @@index([tenantId])
+}
+
+// Registro individual de cada llamada IA (idempotencia por elevenLabsCallId).
+model CallLog {
+  id                       String  @id @default(cuid())
+  tenantId                 String
+  agentId                  String?
+  userId                   String?
+  conversationId           String?
+  elevenLabsConversationId String?
+  elevenLabsCallId         String? @unique
+  direction                CallDirection @default(INBOUND)
+  status                   CallStatus    @default(STARTED)
+  startedAt        DateTime  @default(now())
+  endedAt          DateTime?
+  durationSeconds  Int       @default(0)
+  estimatedCostUsd Decimal   @default(0) @db.Decimal(10, 4)
+  customerPhone    String?
+  summary          String?
+  transcript       String?
+  metadata         Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, startedAt])
+  @@index([agentId])
+}
+
+// Contador agregado de consumo por tenant y periodo (mes calendario).
+// A diferencia de UsageMetric (eventos individuales para dashboard), este es
+// el registro que el enforcement de planes lee en caliente: una sola fila.
+model UsageCounter {
+  id          String   @id @default(cuid())
+  tenantId    String
+  periodStart DateTime
+  periodEnd   DateTime
+  inboundMessages  Int @default(0)
+  outboundMessages Int @default(0)
+  totalMessages    Int @default(0)
+  aiInputTokens    Int @default(0)
+  aiOutputTokens   Int @default(0)
+  aiTotalTokens    Int @default(0)
+  audioTranscriptionSeconds Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, periodStart])
+  @@index([tenantId])
+}
+
 model UsageMetric {
   id         String     @id @default(cuid())
   tenantId   String
@@ -570,5 +912,93 @@ model UsageMetric {
   @@index([tenantId])
   @@index([agentId])
   @@index([metricType])
+  @@index([createdAt])
+}
+
+// ─── Soporte (asistente IA de soporte + tickets) ─────────────────────────────
+// Los playbooks viven en markdown (docs/support-playbooks/); la BD solo
+// persiste tickets y su auditoría. Sin relaciones duras a Tenant/User para
+// poder registrar tickets de sistema (tenantId null) sin tocar esos modelos.
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_USER
+  RESOLVED
+  ESCALATED
+  CLOSED
+}
+
+enum SupportTier {
+  TIER_1
+  TIER_2
+  TIER_3
+}
+
+enum SupportSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SupportSource {
+  USER
+  SYSTEM
+  AI
+  ADMIN
+}
+
+enum SupportActorType {
+  AI
+  USER
+  ADMIN
+  SYSTEM
+}
+
+model SupportTicket {
+  id                String              @id @default(cuid())
+  tenantId          String?
+  userId            String?
+  createdByUserId   String?
+  assignedToAdminId String?
+  title             String
+  description       String
+  status            SupportTicketStatus @default(OPEN)
+  tier              SupportTier         @default(TIER_2)
+  severity          SupportSeverity     @default(MEDIUM)
+  category          String?
+  source            SupportSource       @default(USER)
+  aiSummary         String?
+  detectedIssue     String?
+  recommendedAction String?
+  resolution        String?
+  metadataJson      Json?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  resolvedAt        DateTime?
+
+  auditLogs SupportAuditLog[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([tier])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+model SupportAuditLog {
+  id              String           @id @default(cuid())
+  supportTicketId String?
+  actorType      SupportActorType
+  // id del usuario/admin o etiqueta del agente IA ("support-agent")
+  actorId        String?
+  action         String
+  detailsJson    Json?
+  createdAt      DateTime         @default(now())
+
+  ticket SupportTicket? @relation(fields: [supportTicketId], references: [id], onDelete: SetNull)
+
+  @@index([supportTicketId])
   @@index([createdAt])
 }

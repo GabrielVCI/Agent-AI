@@ -3,13 +3,33 @@ import { prisma } from "../config/prisma.js";
 import { generateQuotePdf } from "./pdf.service.js";
 import { addQuoteItemBySearch, getQuoteById } from "./quote.service.js";
 import { searchProductForTenant } from "./product.service.js";
-import type { AgentDecision, AgentProductRequest } from "../types/agent.types.js";
+import { formatCatalogItemReply } from "../utils/product-presenter.js";
+import {
+  createAppointment,
+  getAppointmentSettings,
+  checkSlotAvailability,
+  formatScheduledAt,
+} from "./appointment.service.js";
+import type {
+  AgentDecision,
+  AgentProductRequest,
+  AgentAppointmentRequest,
+} from "../types/agent.types.js";
 
 type ExecuteAgentActionsInput = {
   decision: AgentDecision;
   quoteId: string;
   conversationId: string;
   tenantId: string;
+};
+
+/** Borrador de cita en metadata de la conversación (slot-filling entre mensajes). */
+type AppointmentDraft = {
+  customerName: string;
+  serviceText: string;
+  dateTimeText: string;
+  isoDateTime: string;
+  updatedAt: string;
 };
 
 type LastProductContext = {
@@ -139,6 +159,10 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
   let pdfPath: string | null = null;
   let pdfFilename: string | null = null;
   let finalReplyText = input.decision.replyText;
+  // Señales de calidad del turno (Parte E): qué logró realmente la gestión.
+  let appointmentCreated = false;
+  let quoteGenerated = false;
+  let catalogMatched = false;
 
   const hasGeneratePdfAction = input.decision.actions.some((a) => a.type === "GENERATE_PDF");
 
@@ -197,6 +221,7 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
     const quote = await getQuoteById(input.quoteId, input.tenantId);
 
     if (addedProducts.length > 0) {
+      catalogMatched = true;
       finalReplyText = `Listo. Agregué a tu cotización:\n\n${addedProducts
         .map((item) => `- ${item}`)
         .join("\n")}\n\nTotal actual: ${formatDOP(quote.total)}.`;
@@ -226,6 +251,7 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
       );
 
       if (result.status === "FOUND" && result.product) {
+        catalogMatched = true;
         await saveLastProductContext({
           conversationId: input.conversationId,
           productId: result.product.id,
@@ -233,9 +259,7 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
           productUnit: result.product.unit,
           customerText: productRequest.originalText,
         });
-        finalReplyText = `Sí, tenemos ${result.product.name}.\n\nPrecio: ${formatDOP(
-          result.product.price
-        )}\nExistencia: ${result.product.stock} ${result.product.unit}.\n\n¿Deseas que te lo agregue a una cotización?`;
+        finalReplyText = formatCatalogItemReply(result.product);
       } else if (result.status === "NEEDS_CONFIRMATION" && result.product) {
         await saveLastProductContext({
           conversationId: input.conversationId,
@@ -256,11 +280,18 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
     }
   }
 
+  if (input.decision.intent === "SCHEDULE_APPOINTMENT") {
+    const appointmentResult = await handleAppointmentIntent(input);
+    finalReplyText = appointmentResult.text;
+    appointmentCreated = appointmentResult.created;
+  }
+
   if (hasGeneratePdfAction || input.decision.intent === "GENERATE_QUOTE") {
     const pdfResult = await generateQuotePdf(input.quoteId, input.tenantId);
     pdfUrl = pdfResult.pdfUrl;
     pdfPath = pdfResult.filePath;
     pdfFilename = pdfResult.fileName;
+    quoteGenerated = true;
     finalReplyText =
       "Listo. Generé tu cotización en PDF. Te la estoy enviando como archivo adjunto.";
   }
@@ -273,5 +304,166 @@ export async function executeAgentActions(input: ExecuteAgentActionsInput) {
     addedProducts,
     needsConfirmation,
     notFoundProducts,
+    appointmentCreated,
+    quoteGenerated,
+    catalogMatched,
+  };
+}
+
+// ─── Citas (SCHEDULE_APPOINTMENT) ────────────────────────────────────────────
+
+async function getAppointmentDraft(conversationId: string): Promise<AppointmentDraft | null> {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { metadata: true },
+  });
+  const meta = getConversationMeta(conversation?.metadata ?? null);
+  return (meta.appointmentDraft as AppointmentDraft) ?? null;
+}
+
+async function saveAppointmentDraft(conversationId: string, draft: AppointmentDraft | null) {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { metadata: true },
+  });
+  const meta = getConversationMeta(conversation?.metadata ?? null);
+  if (draft) {
+    meta.appointmentDraft = draft;
+  } else {
+    delete meta.appointmentDraft;
+  }
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { metadata: meta as Prisma.InputJsonValue },
+  });
+}
+
+function parseIsoDateTime(value: string): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  // Rechazar fechas en el pasado (tolerancia de 5 min por desfases de reloj)
+  if (date.getTime() < Date.now() - 5 * 60 * 1000) return null;
+  return date;
+}
+
+/**
+ * Slot-filling de citas: fusiona lo extraído en este turno con el borrador de
+ * la conversación; si el trío nombre+servicio+fecha está completo crea la cita
+ * (source AI) y limpia el borrador. Nunca inventa disponibilidad: solo detecta
+ * choques exactos de horario y sugiere otra hora.
+ */
+async function handleAppointmentIntent(
+  input: ExecuteAgentActionsInput
+): Promise<{ text: string; created: boolean }> {
+  const req: AgentAppointmentRequest = input.decision.appointmentRequest ?? {
+    customerName: "",
+    serviceText: "",
+    dateTimeText: "",
+    isoDateTime: "",
+  };
+
+  const previous = await getAppointmentDraft(input.conversationId);
+
+  const draft: AppointmentDraft = {
+    customerName: req.customerName.trim() || previous?.customerName || "",
+    serviceText: req.serviceText.trim() || previous?.serviceText || "",
+    dateTimeText: req.dateTimeText.trim() || previous?.dateTimeText || "",
+    isoDateTime: req.isoDateTime.trim() || previous?.isoDateTime || "",
+    updatedAt: new Date().toISOString(),
+  };
+
+  const scheduledAt = parseIsoDateTime(draft.isoDateTime);
+
+  const missing: string[] = [];
+  if (!draft.serviceText) missing.push("el servicio que necesitas");
+  if (!scheduledAt) missing.push("la fecha y hora");
+  if (!draft.customerName) missing.push("tu nombre");
+
+  if (missing.length > 0) {
+    await saveAppointmentDraft(input.conversationId, draft);
+    // El modelo normalmente ya pregunta lo que falta con naturalidad;
+    // el texto determinístico es el respaldo si vino vacío.
+    return {
+      text:
+        input.decision.replyText?.trim() ||
+        `Con gusto te agendo. Solo me falta ${missing.join(" y ")}.`,
+      created: false,
+    };
+  }
+
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      agentId: true,
+      whatsappPhone: true,
+      customer: { select: { phone: true } },
+    },
+  });
+  const customerPhone =
+    conversation?.customer?.phone || conversation?.whatsappPhone || "desconocido";
+
+  const settings = await getAppointmentSettings(input.tenantId);
+
+  // Validación completa contra la disponibilidad del negocio:
+  // pasado, horario semanal configurado y capacidad del slot.
+  const availability = await checkSlotAvailability(input.tenantId, scheduledAt!, settings);
+  if (!availability.ok) {
+    // Se conserva nombre/servicio y solo se vuelve a pedir la fecha/hora.
+    await saveAppointmentDraft(input.conversationId, {
+      ...draft,
+      isoDateTime: "",
+      dateTimeText: "",
+    });
+    const { fecha, hora } = formatScheduledAt(scheduledAt!);
+    return {
+      text: `No puedo agendarte para ${fecha} a las ${hora}: ${availability.detail}. ¿Qué otro horario te sirve? Dímelo y lo registro.`,
+      created: false,
+    };
+  }
+
+  // Intentar vincular el servicio a un ítem real del catálogo (opcional)
+  let catalogItemId: string | null = null;
+  let serviceName = draft.serviceText;
+  try {
+    const match = await searchProductForTenant(draft.serviceText, input.tenantId);
+    if (match.status === "FOUND" && match.product) {
+      catalogItemId = match.product.id;
+      serviceName = match.product.name;
+    }
+  } catch {
+    // La búsqueda en catálogo es un extra: la cita se crea igual sin vínculo.
+  }
+
+  // Sin horario configurado, el sistema no puede verificar disponibilidad:
+  // la cita nace PENDING aunque autoConfirmAI esté activo.
+  const canAutoConfirm = settings.autoConfirmAI && settings.weeklySchedule !== null;
+
+  const appointment = await createAppointment(input.tenantId, {
+    customerName: draft.customerName,
+    customerPhone,
+    scheduledAt: scheduledAt!,
+    serviceOrProduct: serviceName,
+    catalogItemId,
+    notes: `Solicitada por WhatsApp: "${draft.dateTimeText}"`,
+    source: "AI",
+    agentId: conversation?.agentId ?? null,
+    conversationId: input.conversationId,
+    status: canAutoConfirm ? "CONFIRMED" : "PENDING",
+  });
+
+  await saveAppointmentDraft(input.conversationId, null);
+
+  const { fecha, hora } = formatScheduledAt(new Date(appointment.scheduledAt));
+  const estado = canAutoConfirm
+    ? "quedó confirmada"
+    : "quedó registrada (te confirmaremos en breve)";
+  const recordatorio = settings.reminderEnabled
+    ? " Te enviaremos un recordatorio antes de la hora."
+    : "";
+
+  return {
+    text: `Listo, ${appointment.customerName}. Tu cita de ${appointment.serviceOrProduct} ${estado} para ${fecha} a las ${hora}.${recordatorio}`,
+    created: true,
   };
 }

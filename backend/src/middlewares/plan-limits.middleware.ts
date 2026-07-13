@@ -28,7 +28,11 @@ async function getTenantPlanUsage(tenantId: string) {
   ]);
 
   return {
-    plan: subscription.plan,
+    plan: {
+      ...subscription.plan,
+      // Overrides negociados por tenant tienen prioridad sobre el plan base
+      maxAgents: subscription.customMaxAgents ?? subscription.plan.maxAgents,
+    },
     usage: { agentCount, monthlyConversations, monthlyQuotes },
   };
 }

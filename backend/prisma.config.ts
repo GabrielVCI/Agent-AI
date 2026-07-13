@@ -6,6 +6,9 @@ export default defineConfig({
     seed: 'tsx prisma/seed.ts',
   },
   datasource: {
-    url: process.env.DATABASE_URL,
+    // Migraciones/db push SIEMPRE por conexión directa: PgBouncer en
+    // transaction mode no soporta los locks de Prisma Migrate.
+    // En dev local DIRECT_URL no existe y se usa DATABASE_URL como siempre.
+    url: process.env.DIRECT_URL || process.env.DATABASE_URL,
   },
 })

@@ -30,22 +30,20 @@ function buildCachePayload(user: {
   };
 }
 
-export async function loginUser(
-  email: string,
-  password: string,
+type SessionUser = {
+  id: string;
+  tenantId: string | null;
+  email: string;
+  name: string;
+  role: string;
+  status: string;
+};
+
+/** Crea la sesión en DB, actualiza lastLoginAt y cachea en Redis. */
+async function createSessionForUser(
+  user: SessionUser,
   meta: { userAgent?: string; ipAddress?: string }
 ): Promise<{ token: string; user: AuthenticatedUser }> {
-  const user = await prisma.user.findUnique({ where: { email } });
-
-  if (!user || user.status === "DISABLED") {
-    throw new AppError("Credenciales inválidas", 401);
-  }
-
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) {
-    throw new AppError("Credenciales inválidas", 401);
-  }
-
   const token = generateToken(32);
   const tokenHash = hashToken(token);
   const expiresAt = new Date(Date.now() + env.SESSION_TTL_SECONDS * 1000);
@@ -88,6 +86,121 @@ export async function loginUser(
   };
 
   return { token, user: authUser };
+}
+
+export async function loginUser(
+  email: string,
+  password: string,
+  meta: { userAgent?: string; ipAddress?: string }
+): Promise<{ token: string; user: AuthenticatedUser }> {
+  const user = await prisma.user.findUnique({ where: { email } });
+
+  if (!user || user.status === "DISABLED") {
+    throw new AppError("Credenciales inválidas", 401);
+  }
+
+  if (!user.passwordHash) {
+    throw new AppError(
+      "Esta cuenta se creó con Google. Usa el botón «Continuar con Google».",
+      401
+    );
+  }
+
+  const valid = await bcrypt.compare(password, user.passwordHash);
+  if (!valid) {
+    throw new AppError("Credenciales inválidas", 401);
+  }
+
+  return createSessionForUser(user, meta);
+}
+
+export async function registerUser(
+  input: { name: string; lastName: string; email: string; password: string },
+  meta: { userAgent?: string; ipAddress?: string }
+): Promise<{ token: string; user: AuthenticatedUser }> {
+  const email = input.email.toLowerCase().trim();
+
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    throw new AppError("Ya existe una cuenta con ese correo", 409);
+  }
+
+  const passwordHash = await hashPassword(input.password);
+
+  // Sin tenant al registrarse: el onboarding crea la empresa y lo asocia como OWNER.
+  const user = await prisma.user.create({
+    data: {
+      name: input.name.trim(),
+      lastName: input.lastName.trim(),
+      email,
+      passwordHash,
+      role: "OWNER",
+      status: "ACTIVE",
+      authProvider: "LOCAL",
+    },
+  });
+
+  return createSessionForUser(user, meta);
+}
+
+/** Login/creación de cuenta a partir de un perfil de Google verificado (server-side). */
+export async function loginWithGoogleProfile(
+  profile: {
+    googleId: string;
+    email: string;
+    emailVerified: boolean;
+    firstName: string;
+    lastName: string | null;
+  },
+  meta: { userAgent?: string; ipAddress?: string }
+): Promise<{ token: string; user: AuthenticatedUser }> {
+  if (!profile.emailVerified) {
+    throw new AppError("Tu cuenta de Google no tiene el correo verificado", 401);
+  }
+
+  let user = await prisma.user.findUnique({ where: { googleId: profile.googleId } });
+
+  if (!user) {
+    // Vincular por email si ya existe una cuenta local con ese correo
+    const byEmail = await prisma.user.findUnique({ where: { email: profile.email } });
+    if (byEmail) {
+      user = await prisma.user.update({
+        where: { id: byEmail.id },
+        data: { googleId: profile.googleId },
+      });
+    } else {
+      user = await prisma.user.create({
+        data: {
+          name: profile.firstName,
+          lastName: profile.lastName,
+          email: profile.email,
+          googleId: profile.googleId,
+          passwordHash: null,
+          role: "OWNER",
+          status: "ACTIVE",
+          authProvider: "GOOGLE",
+        },
+      });
+    }
+  }
+
+  if (user.status === "DISABLED") {
+    throw new AppError("Tu cuenta está deshabilitada. Contacta al administrador.", 403);
+  }
+
+  return createSessionForUser(user, meta);
+}
+
+/**
+ * Invalida la copia en Redis de la sesión (p. ej. cuando cambia el tenantId
+ * tras el onboarding); la próxima petición se resuelve desde DB.
+ */
+export async function invalidateSessionCache(token: string): Promise<void> {
+  try {
+    await getRedisClient().del(sessionKey(hashToken(token)));
+  } catch {
+    // Redis no disponible — resolveSession ya usa DB como fallback
+  }
 }
 
 export async function resolveSession(token: string): Promise<AuthenticatedUser | null> {

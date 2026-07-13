@@ -5,7 +5,7 @@ import OpenAI from "openai";
  * Sugiere intervención humana sin exponer detalles técnicos.
  */
 export const OPENAI_FAILURE_REPLY =
-  "Ahora mismo tuve un problema procesando tu mensaje. Te conecto con una persona para ayudarte.";
+  "Dame un momento, voy a pasar tu solicitud a un asesor para ayudarte mejor.";
 
 export type OpenAiErrorInfo = {
   /** Mensaje técnico para logs internos. NUNCA se expone al cliente final. */
