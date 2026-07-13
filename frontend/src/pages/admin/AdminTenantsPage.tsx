@@ -5,16 +5,9 @@ import { AdminTenant } from '../../types'
 import api from '../../lib/api'
 import Badge from '../../components/ui/Badge'
 import Button from '../../components/ui/Button'
-import Modal from '../../components/ui/Modal'
 import Alert from '../../components/ui/Alert'
 import LoadingSpinner from '../../components/ui/LoadingSpinner'
-
-interface NewTenantForm {
-  name: string
-  email: string
-  ownerName: string
-  planId: string
-}
+import NewClientModal from '../../components/admin/NewClientModal'
 
 type AdminTenantsApiResponse = {
   success?: boolean
@@ -25,13 +18,6 @@ type AdminTenantsApiResponse = {
   page?: number
   limit?: number
   pages?: number
-}
-
-const defaultForm: NewTenantForm = {
-  name: '',
-  email: '',
-  ownerName: '',
-  planId: '',
 }
 
 function toArray<T = unknown>(value: unknown): T[] {
@@ -97,6 +83,7 @@ function normalizeTenant(raw: unknown): AdminTenant {
     status: toStringSafe(tenant.status || 'ACTIVE') as AdminTenant['status'],
 
     plan:
+      tenant.planDisplayName ||
       tenant.planName ||
       tenant.plan?.name ||
       tenant.subscription?.plan?.name ||
@@ -104,6 +91,12 @@ function normalizeTenant(raw: unknown): AdminTenant {
       tenant.subscription?.plan ||
       tenant.plan ||
       'Sin plan',
+
+    monthlyPrice: tenant.effectiveMonthlyPrice != null ? toNumber(tenant.effectiveMonthlyPrice) : null,
+    planCurrency: toStringSafe(tenant.planCurrency, 'USD'),
+    billingMode: toStringSafe(tenant.billingMode) || null,
+    paymentStatus: toStringSafe(tenant.paymentStatus) || null,
+    nextBillingDate: tenant.nextBillingDate ? toStringSafe(tenant.nextBillingDate) : null,
 
     subscriptionStatus:
       tenant.subscriptionStatus ||
@@ -124,6 +117,10 @@ function normalizeTenant(raw: unknown): AdminTenant {
         tenant._count?.Agent ??
         tenant.counts?.agents
     ),
+
+    usageMessages: toNumber(tenant.monthlyUsage?.totalMessages),
+    usageLimit: toNumber(tenant.monthlyUsage?.messageLimit),
+    usageExceeded: Boolean(tenant.monthlyUsage?.exceeded),
 
     conversationsCount: toNumber(
       tenant.conversationsCount ??
@@ -187,10 +184,10 @@ export default function AdminTenantsPage() {
   const navigate = useNavigate()
   const [tenants, setTenants] = useState<AdminTenant[]>([])
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [planFilter, setPlanFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
-  const [form, setForm] = useState<NewTenantForm>(defaultForm)
-  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -224,6 +221,9 @@ export default function AdminTenantsPage() {
   const normalizedSearch = search.trim().toLowerCase()
 
   const filtered = tenants.filter(t => {
+    if (statusFilter && t.status !== statusFilter) return false
+    if (planFilter && !toStringSafe(t.plan).toLowerCase().includes(planFilter.toLowerCase()))
+      return false
     if (!normalizedSearch) return true
 
     const name = toStringSafe(t.name).toLowerCase()
@@ -238,34 +238,6 @@ export default function AdminTenantsPage() {
       status.includes(normalizedSearch)
     )
   })
-
-  const handleCreate = async () => {
-    if (!form.name.trim() || !form.email.trim()) {
-      setError('Nombre y correo son requeridos')
-      return
-    }
-
-    setSaving(true)
-    setError('')
-
-    try {
-      await api.post('/api/admin/tenants', {
-        name: form.name.trim(),
-        email: form.email.trim(),
-        ownerName: form.ownerName.trim(),
-        planId: form.planId.trim() || undefined,
-      })
-
-      setModalOpen(false)
-      setForm(defaultForm)
-      await load()
-    } catch (err: unknown) {
-      const e = err as { message?: string }
-      setError(e?.message || 'Error al crear cliente')
-    } finally {
-      setSaving(false)
-    }
-  }
 
   const suspend = async (id: string) => {
     if (!id) return
@@ -347,16 +319,38 @@ export default function AdminTenantsPage() {
         </Alert>
       )}
 
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-
-        <input
-          type="text"
-          placeholder="Buscar por nombre, correo, plan o estado..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="w-full max-w-sm pl-9 pr-4 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-        />
+      <div className="flex flex-wrap gap-2">
+        <div className="relative flex-1 min-w-[220px] max-w-sm">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Buscar por nombre, correo, plan o estado..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+          />
+        </div>
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value)}
+          className="px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500"
+        >
+          <option value="">Todos los estados</option>
+          <option value="ACTIVE">Activas</option>
+          <option value="SUSPENDED">Suspendidas</option>
+          <option value="CANCELLED">Canceladas</option>
+        </select>
+        <select
+          value={planFilter}
+          onChange={e => setPlanFilter(e.target.value)}
+          className="px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500"
+        >
+          <option value="">Todos los planes</option>
+          <option value="Básico">Básico</option>
+          <option value="Pro">Pro</option>
+          <option value="Enterprise">Enterprise</option>
+          <option value="personalizado">Personalizado</option>
+        </select>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -377,9 +371,10 @@ export default function AdminTenantsPage() {
                     'Empresa',
                     'Email',
                     'Plan',
+                    'Mensualidad',
                     'Estado',
-                    'Agentes',
-                    'Números',
+                    'Uso (mes)',
+                    'Próx. cobro',
                     'Creado',
                     'Acciones',
                   ].map(h => (
@@ -405,19 +400,56 @@ export default function AdminTenantsPage() {
                     </td>
 
                     <td className="px-4 py-3">
-                      <Badge variant="info">{t.plan || 'Sin plan'}</Badge>
+                      <Badge variant={toStringSafe(t.plan).includes('personalizado') || toStringSafe(t.billingMode) === 'CUSTOM' ? 'purple' : 'info'}>
+                        {t.plan || 'Sin plan'}
+                      </Badge>
+                    </td>
+
+                    <td className="px-4 py-3 whitespace-nowrap text-slate-700">
+                      {t.monthlyPrice != null ? (
+                        <>
+                          {t.planCurrency === 'USD' ? 'USD ' : ''}
+                          {t.monthlyPrice.toLocaleString()}
+                          {t.paymentStatus === 'OVERDUE' && (
+                            <span className="ml-1 text-red-600 font-semibold" title="Pago atrasado">⚠</span>
+                          )}
+                          {t.billingMode === 'FREE' && (
+                            <span className="ml-1 text-xs text-slate-400">(gratis)</span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
                     </td>
 
                     <td className="px-4 py-3">
                       {statusBadge(t.status)}
                     </td>
 
-                    <td className="px-4 py-3 text-slate-700">
-                      {toNumber(t.agentsCount)}
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {t.usageLimit > 0 ? (
+                        <span
+                          className={`text-sm ${
+                            t.usageExceeded
+                              ? 'text-red-600 font-semibold'
+                              : t.usageMessages / t.usageLimit >= 0.8
+                                ? 'text-amber-600 font-medium'
+                                : 'text-slate-700'
+                          }`}
+                        >
+                          {toNumber(t.usageMessages).toLocaleString()} /{' '}
+                          {toNumber(t.usageLimit).toLocaleString()}
+                          {t.usageExceeded && ' ⚠'}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 text-sm">
+                          {toNumber(t.usageMessages).toLocaleString()} / —
+                        </span>
+                      )}
                     </td>
 
-                    <td className="px-4 py-3 text-slate-700">
-                      {toNumber(t.connectedNumbers)}
+                    <td className="px-4 py-3 text-slate-500 whitespace-nowrap">
+                      {t.nextBillingDate ? formatDate(t.nextBillingDate) : '—'}
                     </td>
 
                     <td className="px-4 py-3 text-slate-500 whitespace-nowrap">
@@ -473,76 +505,7 @@ export default function AdminTenantsPage() {
         )}
       </div>
 
-      <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title="Crear nuevo cliente"
-        size="md"
-      >
-        <div className="space-y-4">
-          {error && (
-            <Alert variant="danger">
-              {error}
-            </Alert>
-          )}
-
-          <div>
-            <label className="label">Nombre de la empresa *</label>
-            <input
-              className="input"
-              value={form.name}
-              onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="label">Correo del propietario *</label>
-            <input
-              type="email"
-              className="input"
-              value={form.email}
-              onChange={e => setForm(p => ({ ...p, email: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="label">Nombre del propietario</label>
-            <input
-              className="input"
-              value={form.ownerName}
-              onChange={e => setForm(p => ({ ...p, ownerName: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="label">Plan</label>
-            <input
-              className="input"
-              value={form.planId}
-              onChange={e => setForm(p => ({ ...p, planId: e.target.value }))}
-              placeholder="ID del plan"
-            />
-          </div>
-
-          <div className="flex gap-3">
-            <Button
-              variant="secondary"
-              onClick={() => setModalOpen(false)}
-              className="flex-1"
-            >
-              Cancelar
-            </Button>
-
-            <Button
-              loading={saving}
-              onClick={handleCreate}
-              className="flex-1"
-            >
-              Crear cliente
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      <NewClientModal open={modalOpen} onClose={() => setModalOpen(false)} onCreated={load} />
     </div>
   )
 }

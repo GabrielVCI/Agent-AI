@@ -5,10 +5,12 @@ import {
 } from 'lucide-react'
 import {
   Agent, AgentInput, AgentType, AgentIntent, AgentTestResult,
+  ConversationIntent, ConversationOutcome,
 } from '../types'
 import {
   listAgents, createAgent, updateAgent, setAgentStatus, testAgent,
 } from '../services/agentsApi'
+import { voiceApi, VoiceEntitlement } from '../services/voiceApi'
 import api from '../lib/api'
 import { Card } from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
@@ -43,8 +45,42 @@ const intentLabels: Record<AgentIntent, string> = {
   REMOVE_FROM_QUOTE: 'Quitar de cotización',
   GENERATE_QUOTE: 'Generar cotización',
   ASK_RECOMMENDATION: 'Pide recomendación',
+  SCHEDULE_APPOINTMENT: 'Agendar cita',
   HUMAN_HANDOFF: 'Pasar a humano',
   UNKNOWN: 'Desconocido',
+}
+
+const conversationIntentLabels: Record<ConversationIntent, string> = {
+  GREETING: 'Saludo',
+  PRODUCT_INQUIRY: 'Consulta de producto',
+  SERVICE_INQUIRY: 'Consulta de servicio',
+  QUOTE_REQUEST: 'Solicitud de cotización',
+  APPOINTMENT_REQUEST: 'Solicitud de cita',
+  SUPPORT_REQUEST: 'Soporte',
+  HUMAN_REQUEST: 'Pide humano',
+  COMPLAINT: 'Reclamo',
+  OFF_TOPIC: 'Fuera de tema',
+  SPAM: 'Spam',
+  WRONG_NUMBER: 'Número equivocado',
+  UNKNOWN: 'Desconocido',
+}
+
+const outcomeLabels: Record<ConversationOutcome, string> = {
+  PRODUCTIVE: 'Productiva',
+  NEEDS_INFO: 'Falta información',
+  NEEDS_HUMAN: 'Requiere humano',
+  NOT_RELATED: 'No relacionada',
+  SPAM: 'Spam',
+  WRONG_NUMBER: 'Número equivocado',
+  COMPLETED: 'Gestión completada',
+}
+
+/** Color del badge de resultado del turno según su severidad. */
+const outcomeVariant = (o: ConversationOutcome): 'success' | 'warning' | 'danger' | 'default' => {
+  if (o === 'PRODUCTIVE' || o === 'COMPLETED') return 'success'
+  if (o === 'NEEDS_HUMAN' || o === 'NEEDS_INFO') return 'warning'
+  if (o === 'SPAM' || o === 'WRONG_NUMBER' || o === 'NOT_RELATED') return 'danger'
+  return 'default'
 }
 
 const DEFAULT_PROMPT =
@@ -69,6 +105,8 @@ const defaultForm: AgentForm = {
   whatsappPhoneNumberId: '',
   allowAudio: false,
   allowHumanIntervention: true,
+  allowVoiceCalls: false,
+  elevenLabsAgentId: '',
 }
 
 function formatDate(iso?: string): string {
@@ -78,6 +116,7 @@ function formatDate(iso?: string): string {
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([])
+  const [voiceEntitlement, setVoiceEntitlement] = useState<VoiceEntitlement | null>(null)
   const [planLimit, setPlanLimit] = useState<PlanLimit | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -143,6 +182,19 @@ export default function AgentsPage() {
 
   useEffect(() => { load() }, [load])
 
+  useEffect(() => {
+    // El entitlement de voz decide si el toggle "Permitir llamadas" se habilita.
+    // Si falla la carga, el toggle queda deshabilitado (comportamiento seguro).
+    voiceApi
+      .entitlement()
+      .then(e => setVoiceEntitlement(e ?? null))
+      .catch(() => setVoiceEntitlement(null))
+  }, [])
+
+  // El plan soporta voz si NO está bloqueado por plan (Enterprise u override)
+  const voicePlanAvailable =
+    voiceEntitlement !== null && voiceEntitlement.reason !== 'PLAN_REQUIRED'
+
   // --- Crear / editar ---
   const openCreate = () => {
     setEditTarget(null)
@@ -165,6 +217,8 @@ export default function AgentsPage() {
       whatsappPhoneNumberId: agent.whatsappPhoneNumberId || '',
       allowAudio: agent.allowAudio,
       allowHumanIntervention: agent.allowHumanIntervention,
+      allowVoiceCalls: agent.allowVoiceCalls,
+      elevenLabsAgentId: agent.elevenLabsAgentId || '',
     })
     setFormError('')
     setModalOpen(true)
@@ -252,7 +306,7 @@ export default function AgentsPage() {
   const atLimit = planLimit ? planLimit.usedAgents >= planLimit.maxAgents : false
 
   return (
-    <div className="p-6 max-w-screen-xl mx-auto space-y-6">
+    <div className="p-4 lg:p-6 max-w-screen-xl mx-auto w-full space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
@@ -354,6 +408,12 @@ export default function AgentsPage() {
                   <Mic className="h-3 w-3 mr-1" />
                   {agent.allowAudio ? 'Audio' : 'Sin audio'}
                 </Badge>
+                {agent.allowVoiceCalls && (
+                  <Badge variant="success">
+                    <Phone className="h-3 w-3 mr-1" />
+                    Llamadas
+                  </Badge>
+                )}
               </div>
 
               <p className="text-[11px] text-slate-400 mb-3">
@@ -456,11 +516,48 @@ export default function AgentsPage() {
               <input type="checkbox" checked={form.allowHumanIntervention} onChange={e => setForm(f => ({ ...f, allowHumanIntervention: e.target.checked }))} className="rounded" />
               <span className="text-sm font-medium text-slate-700">Permitir intervención humana</span>
             </label>
-            <label className="flex items-center gap-2 cursor-pointer">
+            <label
+              className="flex items-center gap-2 cursor-pointer"
+              title="Los audios se transcriben con ElevenLabs y luego el agente responde por texto."
+            >
               <input type="checkbox" checked={form.allowAudio} onChange={e => setForm(f => ({ ...f, allowAudio: e.target.checked }))} className="rounded" />
-              <span className="text-sm font-medium text-slate-700">Permitir audio (próximamente)</span>
+              <span className="text-sm font-medium text-slate-700">Permitir audios de WhatsApp</span>
+            </label>
+            <label
+              className={`flex items-center gap-2 ${voicePlanAvailable ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+              title={
+                voicePlanAvailable
+                  ? 'Este agente podrá contestar llamadas cuando la integración de voz esté activa'
+                  : 'Las llamadas IA están disponibles solo en Enterprise.'
+              }
+            >
+              <input
+                type="checkbox"
+                checked={form.allowVoiceCalls ?? false}
+                disabled={!voicePlanAvailable}
+                onChange={e => setForm(f => ({ ...f, allowVoiceCalls: e.target.checked }))}
+                className="rounded"
+              />
+              <span className="text-sm font-medium text-slate-700">Permitir llamadas IA</span>
             </label>
           </div>
+
+          {/* Configuración ElevenLabs (solo con entitlement de voz) */}
+          {voicePlanAvailable && form.allowVoiceCalls && (
+            <div className="mt-3">
+              <label className="label">ElevenLabs Agent ID</label>
+              <input
+                className="input"
+                value={form.elevenLabsAgentId ?? ''}
+                onChange={e => setForm(f => ({ ...f, elevenLabsAgentId: e.target.value }))}
+                placeholder="agent_xxxxxxxxxxxxxxxx (de tu panel de ElevenLabs)"
+              />
+              <p className="text-xs text-slate-400 mt-1">
+                Vincula este agente con su agente conversacional de ElevenLabs. Al guardar, puedes
+                sincronizar el prompt (identidad + catálogo + disponibilidad) desde el backend.
+              </p>
+            </div>
+          )}
 
           <Alert variant="info">
             <span className="flex items-center gap-1.5">
@@ -565,7 +662,7 @@ function TestResultView({ result }: { result: AgentTestResult }) {
     d.productRequests.length > 0 ||
     d.intent === 'ADD_TO_QUOTE' ||
     d.intent === 'GENERATE_QUOTE'
-  const handoffSuggested = d.requiresHuman || d.intent === 'HUMAN_HANDOFF'
+  const handoffSuggested = result.requiresHuman || d.intent === 'HUMAN_HANDOFF'
 
   return (
     <div className="space-y-4 border-t border-slate-100 pt-4">
@@ -580,7 +677,13 @@ function TestResultView({ result }: { result: AgentTestResult }) {
       {/* Señales estructuradas */}
       <div className="flex flex-wrap gap-2">
         <Badge variant="info">Intención: {intentLabels[d.intent] || d.intent}</Badge>
-        <Badge variant="default">Confianza: {(d.confidence * 100).toFixed(0)}%</Badge>
+        <Badge variant="info">
+          Clasificación: {conversationIntentLabels[result.conversationIntent] || result.conversationIntent}
+        </Badge>
+        <Badge variant={outcomeVariant(result.outcome)}>
+          Resultado: {outcomeLabels[result.outcome] || result.outcome}
+        </Badge>
+        <Badge variant="default">Confianza: {(Number(result.confidence ?? 0) * 100).toFixed(0)}%</Badge>
         <Badge variant={quoteSuggested ? 'success' : 'default'}>
           {quoteSuggested ? 'Sugiere cotización' : 'Sin cotización'}
         </Badge>
@@ -588,6 +691,14 @@ function TestResultView({ result }: { result: AgentTestResult }) {
           {handoffSuggested ? 'Sugiere intervención humana' : 'Sin intervención'}
         </Badge>
       </div>
+
+      {/* Corte por control de gasto */}
+      {result.costControlReason && (
+        <Alert variant="warning">
+          Control de gasto activado: {result.costControlReason}. El agente corta o redirige esta
+          conversación para no consumir tokens de más.
+        </Alert>
+      )}
 
       {/* Items extraídos */}
       {d.productRequests.length > 0 && (
@@ -600,6 +711,24 @@ function TestResultView({ result }: { result: AgentTestResult }) {
                 <span className="text-slate-500 text-xs">
                   {item.quantity}{item.unit ? ` ${item.unit}` : ''}
                 </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Acciones del runtime (en prueba se describen sin ejecutarse) */}
+      {(result.actions ?? []).length > 0 && (
+        <div>
+          <p className="label flex items-center gap-1.5"><Cpu className="h-3.5 w-3.5" />Acciones del runtime</p>
+          <div className="space-y-1.5">
+            {result.actions.map((a, i) => (
+              <div key={i} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                <Badge variant={a.executed ? 'success' : 'info'}>{a.type}</Badge>
+                <span className="text-slate-600 text-xs truncate">{a.detail}</span>
+                {!a.executed && (
+                  <span className="ml-auto text-xs text-slate-400 flex-shrink-0">simulada</span>
+                )}
               </div>
             ))}
           </div>

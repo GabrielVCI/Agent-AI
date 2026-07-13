@@ -37,9 +37,7 @@ function flattenFieldErrors(errors?: Record<string, string[] | string>): string 
   return parts.length ? parts.join(' · ') : undefined
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { params, ...init } = options
-
+function buildUrl(path: string, params?: RequestOptions['params']): string {
   let url = `${BASE_URL}${path}`
   if (params) {
     const query = Object.entries(params)
@@ -48,16 +46,25 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       .join('&')
     if (query) url += `?${query}`
   }
+  return url
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { params, ...init } = options
+  const url = buildUrl(path, params)
+
+  // Con FormData el navegador debe fijar el Content-Type (incluye el boundary)
+  const isFormData = init.body instanceof FormData
+  const headers: HeadersInit = isFormData
+    ? { ...init.headers }
+    : { 'Content-Type': 'application/json', ...init.headers }
 
   let response: Response
   try {
     response = await fetch(url, {
       ...init,
       credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...init.headers,
-      },
+      headers,
     })
   } catch {
     // El servidor no respondió (caído, sin red, CORS).
@@ -121,12 +128,48 @@ export const api = {
 
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 
-  upload: <T>(path: string, formData: FormData) =>
+  upload: <T>(path: string, formData: FormData, params?: Record<string, string | number | boolean | undefined>) =>
     request<T>(path, {
       method: 'POST',
       body: formData,
-      headers: {},
+      params,
     }),
+
+  /**
+   * Descarga un archivo binario (ej. Excel) respetando la sesión por cookie.
+   * Dispara la descarga del navegador con el nombre sugerido por el servidor.
+   */
+  download: async (path: string, params?: Record<string, string | number | boolean | undefined>, fallbackName = 'archivo') => {
+    const url = buildUrl(path, params)
+    let response: Response
+    try {
+      response = await fetch(url, { credentials: 'include' })
+    } catch {
+      throw new ApiError('No se pudo conectar con el servidor. Verifica que el backend esté activo.', 0)
+    }
+    if (!response.ok) {
+      let message = `Error ${response.status}`
+      try {
+        const body = (await response.json()) as ApiEnvelope<unknown>
+        message = body?.message || body?.error || message
+      } catch {
+        // cuerpo no-JSON: usamos el mensaje genérico
+      }
+      throw new ApiError(message, response.status)
+    }
+    const disposition = response.headers.get('Content-Disposition') || ''
+    const match = disposition.match(/filename="?([^";]+)"?/)
+    const filename = match?.[1] || fallbackName
+    const blob = await response.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(objectUrl)
+  },
 }
 
 export default api

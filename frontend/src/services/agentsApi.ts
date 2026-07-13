@@ -8,6 +8,8 @@ import type {
   AgentStats,
   AgentTestResult,
   AgentType,
+  ConversationIntent,
+  ConversationOutcome,
 } from '../types'
 
 /**
@@ -51,6 +53,8 @@ type RawAgent = {
   allowAudioMessages?: boolean
   allowHumanIntervention?: boolean
   allowHumanHandoff?: boolean
+  allowVoiceCalls?: boolean
+  elevenLabsAgentId?: string | null
   createdAt?: string
   updatedAt?: string
   stats?: AgentStats
@@ -81,6 +85,8 @@ export function mapAgentFromApi(raw: RawAgent): Agent {
     aiModel: raw.aiModel ?? raw.openAiModel ?? DEFAULT_MODEL,
     allowAudio: raw.allowAudio ?? raw.allowAudioMessages ?? false,
     allowHumanIntervention: raw.allowHumanIntervention ?? raw.allowHumanHandoff ?? true,
+    allowVoiceCalls: raw.allowVoiceCalls ?? false,
+    elevenLabsAgentId: raw.elevenLabsAgentId ?? undefined,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     stats: raw.stats,
@@ -104,6 +110,9 @@ export function mapAgentToApiPayload(input: AgentInput): Record<string, unknown>
   if (input.allowAudio !== undefined) payload.allowAudio = input.allowAudio
   if (input.allowHumanIntervention !== undefined)
     payload.allowHumanIntervention = input.allowHumanIntervention
+  if (input.allowVoiceCalls !== undefined) payload.allowVoiceCalls = input.allowVoiceCalls
+  if (input.elevenLabsAgentId !== undefined)
+    payload.elevenLabsAgentId = input.elevenLabsAgentId.trim() || null
 
   // whatsappNumber: '' -> null para limpiar la asignación.
   if (input.whatsappNumber !== undefined)
@@ -143,7 +152,16 @@ export async function setAgentStatus(id: string, status: AgentStatus): Promise<A
 
 const VALID_INTENTS: AgentIntent[] = [
   'GREETING', 'SEARCH_PRODUCT', 'ASK_PRICE', 'ADD_TO_QUOTE', 'REMOVE_FROM_QUOTE',
-  'GENERATE_QUOTE', 'ASK_RECOMMENDATION', 'HUMAN_HANDOFF', 'UNKNOWN',
+  'GENERATE_QUOTE', 'ASK_RECOMMENDATION', 'SCHEDULE_APPOINTMENT', 'HUMAN_HANDOFF', 'UNKNOWN',
+]
+
+const VALID_CONVERSATION_INTENTS: ConversationIntent[] = [
+  'GREETING', 'PRODUCT_INQUIRY', 'SERVICE_INQUIRY', 'QUOTE_REQUEST', 'APPOINTMENT_REQUEST',
+  'SUPPORT_REQUEST', 'HUMAN_REQUEST', 'COMPLAINT', 'OFF_TOPIC', 'SPAM', 'WRONG_NUMBER', 'UNKNOWN',
+]
+
+const VALID_OUTCOMES: ConversationOutcome[] = [
+  'PRODUCTIVE', 'NEEDS_INFO', 'NEEDS_HUMAN', 'NOT_RELATED', 'SPAM', 'WRONG_NUMBER', 'COMPLETED',
 ]
 
 function num(value: unknown, fallback = 0): number {
@@ -168,6 +186,10 @@ function normalizeDecision(raw: unknown): AgentDecision {
     actions: Array.isArray(d.actions) ? d.actions : [],
     requiresHuman: Boolean(d.requiresHuman),
     confidence: num(d.confidence, 0),
+    conversationIntent: VALID_CONVERSATION_INTENTS.includes(d.conversationIntent)
+      ? d.conversationIntent
+      : undefined,
+    outcome: VALID_OUTCOMES.includes(d.outcome) ? d.outcome : undefined,
   }
 }
 
@@ -186,6 +208,22 @@ export function mapTestResultFromApi(raw: unknown): AgentTestResult {
       totalTokens: num(usage.totalTokens),
     },
     decision,
+    actions: Array.isArray(r.actions)
+      ? r.actions.map((a: Record<string, any>) => ({
+          type: String(a?.type ?? 'ANSWER'),
+          executed: Boolean(a?.executed),
+          detail: String(a?.detail ?? ''),
+        }))
+      : [],
+    conversationIntent: VALID_CONVERSATION_INTENTS.includes(r.conversationIntent)
+      ? r.conversationIntent
+      : decision.conversationIntent ?? 'UNKNOWN',
+    outcome: VALID_OUTCOMES.includes(r.outcome)
+      ? r.outcome
+      : decision.outcome ?? 'NEEDS_INFO',
+    confidence: num(r.confidence, decision.confidence),
+    requiresHuman: typeof r.requiresHuman === 'boolean' ? r.requiresHuman : decision.requiresHuman,
+    costControlReason: typeof r.costControlReason === 'string' ? r.costControlReason : null,
   }
 }
 

@@ -7,8 +7,12 @@ const sectionTitles: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/conversations': 'Conversaciones',
   '/agents': 'Agentes',
+  '/catalog': 'Catálogo',
+  '/appointments': 'Citas',
+  '/calls': 'Llamadas',
   '/settings': 'Configuración',
   '/company': 'Empresa',
+  '/integrations': 'Herramientas externas',
   '/account': 'Cuenta',
   '/admin': 'Administración',
 }

@@ -57,14 +57,23 @@ export default function CompanyPage() {
   }
 
   return (
-    <div className="p-6 max-w-3xl space-y-6">
-      <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-xl bg-primary-100 flex items-center justify-center">
-          <Building2 className="h-5 w-5 text-primary-600" />
+    <div className="p-4 lg:p-6 max-w-screen-xl mx-auto w-full space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-primary-100 flex items-center justify-center">
+            <Building2 className="h-5 w-5 text-primary-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold text-slate-900">Empresa</h2>
+            <p className="text-sm text-slate-500">Información y datos de tu empresa</p>
+          </div>
         </div>
-        <div>
-          <h2 className="text-xl font-semibold text-slate-900">Empresa</h2>
-          <p className="text-sm text-slate-500">Información y datos de tu empresa</p>
+        {/* Acciones siempre visibles arriba: no hay que bajar hasta el final para guardar */}
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => setForm(company || {})}>Descartar</Button>
+          <Button loading={saving} onClick={handleSave} icon={<Upload className="h-4 w-4" />}>
+            Guardar cambios
+          </Button>
         </div>
       </div>
 
@@ -77,7 +86,7 @@ export default function CompanyPage() {
       <Card>
         <CardHeader title="Información general" />
         <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
             <div>
               <label className="label">Nombre comercial</label>
               <input className="input" value={form.name || ''} onChange={e => set('name', e.target.value)} placeholder="Nombre de la empresa" />
@@ -128,48 +137,44 @@ export default function CompanyPage() {
         </div>
       </Card>
 
-      <Card>
-        <CardHeader title="Redes sociales" description="Opcional" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {(['instagram', 'facebook', 'twitter', 'linkedin'] as const).map(net => (
-            <div key={net}>
-              <label className="label capitalize">{net}</label>
-              <input
-                className="input"
-                value={form.socialMedia?.[net] || ''}
-                onChange={e => setForm(p => ({
-                  ...p,
-                  socialMedia: { ...(p.socialMedia || {}), [net]: e.target.value },
-                }))}
-                placeholder={`https://${net}.com/...`}
-              />
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      <Card>
-        <CardHeader title="Logo" description="Imagen representativa de tu empresa" />
-        <div className="flex items-center gap-4">
-          {form.logoUrl ? (
-            <img src={form.logoUrl} alt="Logo" className="h-16 w-16 rounded-xl object-cover border border-slate-200" />
-          ) : (
-            <div className="h-16 w-16 rounded-xl bg-slate-100 flex items-center justify-center">
-              <Building2 className="h-7 w-7 text-slate-400" />
-            </div>
-          )}
-          <div>
-            <label className="label">URL del logo</label>
-            <input className="input w-80" value={form.logoUrl || ''} onChange={e => set('logoUrl', e.target.value)} placeholder="https://..." />
+      {/* Redes y logo lado a lado en desktop: menos espacio vacío */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <Card>
+          <CardHeader title="Redes sociales" description="Opcional" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {(['instagram', 'facebook', 'twitter', 'linkedin'] as const).map(net => (
+              <div key={net}>
+                <label className="label capitalize">{net}</label>
+                <input
+                  className="input"
+                  value={form.socialMedia?.[net] || ''}
+                  onChange={e => setForm(p => ({
+                    ...p,
+                    socialMedia: { ...(p.socialMedia || {}), [net]: e.target.value },
+                  }))}
+                  placeholder={`https://${net}.com/...`}
+                />
+              </div>
+            ))}
           </div>
-        </div>
-      </Card>
+        </Card>
 
-      <div className="flex gap-3">
-        <Button variant="secondary" onClick={() => setForm(company || {})}>Descartar cambios</Button>
-        <Button loading={saving} onClick={handleSave} icon={<Upload className="h-4 w-4" />}>
-          Guardar cambios
-        </Button>
+        <Card>
+          <CardHeader title="Logo" description="Imagen representativa de tu empresa" />
+          <div className="flex items-center gap-4">
+            {form.logoUrl ? (
+              <img src={form.logoUrl} alt="Logo" className="h-16 w-16 rounded-xl object-cover border border-slate-200" />
+            ) : (
+              <div className="h-16 w-16 rounded-xl bg-slate-100 flex items-center justify-center flex-shrink-0">
+                <Building2 className="h-7 w-7 text-slate-400" />
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <label className="label">URL del logo</label>
+              <input className="input" value={form.logoUrl || ''} onChange={e => set('logoUrl', e.target.value)} placeholder="https://..." />
+            </div>
+          </div>
+        </Card>
       </div>
     </div>
   )

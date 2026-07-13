@@ -1,6 +1,8 @@
 import { Menu, LogOut, ChevronDown } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
+import { SendwaryWordmark } from '../BrandLogo'
+import LogoutConfirmModal from '../auth/LogoutConfirmModal'
 
 interface Props {
   onMenuClick: () => void
@@ -8,8 +10,9 @@ interface Props {
 }
 
 export default function Topbar({ onMenuClick, sectionTitle }: Props) {
-  const { user, logout } = useAuth()
+  const { user } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -31,7 +34,11 @@ export default function Topbar({ onMenuClick, sectionTitle }: Props) {
         <Menu className="h-5 w-5" />
       </button>
 
-      <h1 className="text-base font-semibold text-slate-900 hidden sm:block">{sectionTitle}</h1>
+      {/* En mobile el sidebar está oculto: la marca vive en el topbar */}
+      <div className="lg:hidden">
+        <SendwaryWordmark markClassName="h-7 w-7" textClassName="text-base" />
+      </div>
+      <h1 className="text-base font-semibold text-slate-900 hidden lg:block">{sectionTitle}</h1>
 
       <div className="ml-auto flex items-center gap-2" ref={menuRef}>
         <div className="relative">
@@ -58,7 +65,7 @@ export default function Topbar({ onMenuClick, sectionTitle }: Props) {
                 <p className="text-xs text-slate-500 truncate">{user?.email}</p>
               </div>
               <button
-                onClick={() => { setMenuOpen(false); logout() }}
+                onClick={() => { setMenuOpen(false); setLogoutConfirmOpen(true) }}
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 hover:text-red-600 transition-colors"
               >
                 <LogOut className="h-4 w-4" />
@@ -68,6 +75,8 @@ export default function Topbar({ onMenuClick, sectionTitle }: Props) {
           )}
         </div>
       </div>
+
+      <LogoutConfirmModal open={logoutConfirmOpen} onClose={() => setLogoutConfirmOpen(false)} />
     </header>
   )
 }

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Upload, Trash2, RefreshCw, Wifi, WifiOff } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { Trash2, RefreshCw, Wifi, WifiOff, Plus, Play, Send } from 'lucide-react'
+import KnowledgeTab from '../components/settings/KnowledgeTab'
 import { Card, CardHeader } from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
@@ -7,66 +9,58 @@ import Alert from '../components/ui/Alert'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import EmptyState from '../components/ui/EmptyState'
 import api from '../lib/api'
-import { KnowledgeDocument, WhatsAppConnection } from '../types'
+import { WhatsAppConnection, Agent, AgentTestResult } from '../types'
+import {
+  getTraining,
+  saveTraining as saveTrainingApi,
+  emptyTraining,
+  TrainingConfig,
+  TrainingPolicies,
+} from '../services/trainingApi'
+import { listAgents, testAgent } from '../services/agentsApi'
 
 type Tab = 'integrations' | 'knowledge' | 'training' | 'whatsapp'
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'integrations', label: 'Integraciones' },
-  { id: 'knowledge', label: 'Documentos y RAG' },
+  { id: 'knowledge', label: 'Conocimiento' },
   { id: 'training', label: 'Entrenamiento' },
   { id: 'whatsapp', label: 'WhatsApp' },
 ]
 
-interface TrainingData {
-  generalInstructions?: string
-  communicationTone?: string
-  avoidWords?: string
-  faq?: string
-  deliveryPolicy?: string
-  returnPolicy?: string
-  schedule?: string
-  locations?: string
-  escalationRules?: string
-  welcomeMessage?: string
-  unknownMessage?: string
-  offHoursMessage?: string
-}
+const SAMPLE_TEST_MESSAGE = 'Hola, ¿qué servicios ofrecen y hasta qué hora trabajan?'
 
-function docStatusBadge(status: KnowledgeDocument['status']) {
-  switch (status) {
-    case 'READY': return <Badge variant="success">Listo</Badge>
-    case 'PROCESSING': return <Badge variant="info">Procesando</Badge>
-    case 'ERROR': return <Badge variant="danger">Error</Badge>
-    case 'UPLOADED': return <Badge variant="default">Subido</Badge>
-  }
-}
+const isValidTab = (v: string | null): v is Tab => tabs.some(t => t.id === v)
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('integrations')
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
-  const [connections, setConnections] = useState<WhatsAppConnection[]>([])
-  const [training, setTraining] = useState<TrainingData>({})
-  const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [uploading, setUploading] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  // Deep-link: /settings?tab=training abre directo la pestaña (la usa el sidebar)
+  const [searchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab')
+  const [activeTab, setActiveTab] = useState<Tab>(
+    isValidTab(requestedTab) ? requestedTab : 'integrations'
+  )
 
   useEffect(() => {
-    if (activeTab === 'knowledge') loadDocuments()
-    if (activeTab === 'whatsapp') loadConnections()
-    if (activeTab === 'training') loadTraining()
-  }, [activeTab])
+    if (isValidTab(requestedTab)) setActiveTab(requestedTab)
+  }, [requestedTab])
+  const [connections, setConnections] = useState<WhatsAppConnection[]>([])
+  const [training, setTraining] = useState<TrainingConfig>(emptyTraining)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  const loadDocuments = async () => {
-    setLoading(true)
-    try {
-      const data = await api.get<KnowledgeDocument[]>('/api/settings/knowledge-documents')
-      setDocuments(Array.isArray(data) ? data : [])
-    } catch {
-      setDocuments([])
-    } finally { setLoading(false) }
-  }
+  // Probar agente con el contexto guardado
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [testAgentId, setTestAgentId] = useState('')
+  const [testMessage, setTestMessage] = useState(SAMPLE_TEST_MESSAGE)
+  const [testLoading, setTestLoading] = useState(false)
+  const [testResult, setTestResult] = useState<AgentTestResult | null>(null)
+  const [testError, setTestError] = useState('')
+
+  useEffect(() => {
+    if (activeTab === 'whatsapp') loadConnections()
+    if (activeTab === 'training') { loadTraining(); loadAgents() }
+  }, [activeTab])
 
   const loadConnections = async () => {
     setLoading(true)
@@ -81,63 +75,107 @@ export default function SettingsPage() {
   const loadTraining = async () => {
     setLoading(true)
     try {
-      const data = await api.get<TrainingData>('/api/settings/agent-training')
-      setTraining(data && typeof data === 'object' ? data : {})
+      setTraining(await getTraining())
     } catch {
-      setTraining({})
+      setTraining(emptyTraining)
     } finally { setLoading(false) }
   }
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploading(true)
+  const loadAgents = async () => {
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      await api.upload('/api/settings/knowledge-documents', fd)
-      await loadDocuments()
-      setMessage({ type: 'success', text: 'Documento subido correctamente' })
-    } catch (err: unknown) {
-      const er = err as { message?: string }
-      setMessage({ type: 'error', text: er?.message || 'Error al subir el documento' })
-    } finally {
-      setUploading(false)
-      e.target.value = ''
+      const data = await listAgents()
+      setAgents(data)
+      // Por defecto, el primer agente activo (o el primero disponible).
+      const preferred = data.find(a => a.status === 'ACTIVE') ?? data[0]
+      if (preferred) setTestAgentId(prev => prev || preferred.id)
+    } catch {
+      setAgents([])
     }
-  }
-
-  const deleteDocument = async (id: string) => {
-    try {
-      await api.delete(`/api/settings/knowledge-documents/${id}`)
-      setDocuments(prev => prev.filter(d => d.id !== id))
-    } catch {}
   }
 
   const saveTraining = async () => {
     setSaving(true)
+    setMessage(null)
     try {
-      await api.put('/api/settings/agent-training', training)
-      setMessage({ type: 'success', text: 'Configuración guardada' })
-    } catch {
-      setMessage({ type: 'error', text: 'Error al guardar' })
+      const saved = await saveTrainingApi(training)
+      setTraining(saved)
+      setMessage({ type: 'success', text: 'Configuración guardada. El agente ya usa este contexto.' })
+    } catch (err: unknown) {
+      const er = err as { message?: string }
+      setMessage({ type: 'error', text: er?.message || 'Error al guardar' })
     } finally { setSaving(false) }
   }
 
-  const tf = (key: keyof TrainingData, label: string, rows = 2) => (
+  const runTest = async () => {
+    if (!testAgentId || !testMessage.trim()) return
+    setTestLoading(true)
+    setTestError('')
+    setTestResult(null)
+    try {
+      const result = await testAgent(testAgentId, { message: testMessage.trim() })
+      setTestResult(result)
+    } catch (err: unknown) {
+      setTestError((err as { message?: string })?.message || 'No se pudo probar el agente.')
+    } finally {
+      setTestLoading(false)
+    }
+  }
+
+  // --- Helpers de edición ---
+  type StringKey =
+    | 'businessDescription' | 'customInstructions' | 'communicationTone'
+    | 'schedule' | 'address' | 'serviceAreas' | 'escalationRules'
+    | 'welcomeMessage' | 'outOfHoursMessage' | 'fallbackMessage' | 'forbiddenTopics'
+
+  const tf = (key: StringKey, label: string, rows = 2, placeholder = '') => (
     <div>
       <label className="label">{label}</label>
       <textarea
         className="input resize-none"
         rows={rows}
+        placeholder={placeholder}
         value={training[key] || ''}
         onChange={e => setTraining(p => ({ ...p, [key]: e.target.value }))}
       />
     </div>
   )
 
+  const pf = (key: keyof TrainingPolicies, label: string) => (
+    <div>
+      <label className="label">{label}</label>
+      <textarea
+        className="input resize-none"
+        rows={2}
+        value={training.policies[key] || ''}
+        onChange={e => setTraining(p => ({ ...p, policies: { ...p.policies, [key]: e.target.value } }))}
+      />
+    </div>
+  )
+
+  const addService = () =>
+    setTraining(p => ({ ...p, services: [...p.services, { name: '' }] }))
+  const removeService = (i: number) =>
+    setTraining(p => ({ ...p, services: p.services.filter((_, idx) => idx !== i) }))
+  const updateService = (i: number, field: 'name' | 'description' | 'price' | 'notes', value: string) =>
+    setTraining(p => {
+      const services = [...p.services]
+      services[i] = { ...services[i], [field]: value }
+      return { ...p, services }
+    })
+
+  const addFaq = () =>
+    setTraining(p => ({ ...p, faqs: [...p.faqs, { question: '' }] }))
+  const removeFaq = (i: number) =>
+    setTraining(p => ({ ...p, faqs: p.faqs.filter((_, idx) => idx !== i) }))
+  const updateFaq = (i: number, field: 'question' | 'answer', value: string) =>
+    setTraining(p => {
+      const faqs = [...p.faqs]
+      faqs[i] = { ...faqs[i], [field]: value }
+      return { ...p, faqs }
+    })
+
   return (
-    <div className="p-6 max-w-screen-xl space-y-6">
+    <div className="p-4 lg:p-6 max-w-screen-xl mx-auto w-full space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-slate-900">Configuración</h2>
         <p className="text-sm text-slate-500">Gestiona integraciones, documentos y entrenamiento de agentes</p>
@@ -189,93 +227,226 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Knowledge / RAG tab */}
-      {activeTab === 'knowledge' && (
-        <div className="space-y-4">
-          <Alert variant="info">
-            Los documentos que subas aquí serán usados como contexto de conocimiento para tus agentes de IA.
-          </Alert>
-
-          <Card>
-            <CardHeader title="Subir documento" description="PDF, TXT, DOCX, CSV" />
-            <div className="flex items-center gap-4">
-              <label className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors ${uploading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
-                <input
-                  type="file"
-                  className="hidden"
-                  accept=".pdf,.txt,.docx,.csv"
-                  onChange={handleFileUpload}
-                  disabled={uploading}
-                />
-                {!uploading && <Upload className="h-4 w-4" />}
-                {uploading ? 'Subiendo...' : 'Seleccionar archivo'}
-              </label>
-            </div>
-          </Card>
-
-          <Card padding="none">
-            <div className="p-4 border-b border-slate-100">
-              <h3 className="font-semibold text-slate-900 text-sm">Documentos subidos</h3>
-            </div>
-            {loading ? (
-              <div className="flex justify-center py-10"><LoadingSpinner /></div>
-            ) : documents.length === 0 ? (
-              <EmptyState
-                icon={<Upload className="h-8 w-8" />}
-                title="Sin documentos"
-                description="Sube documentos para enriquecer el conocimiento de tus agentes."
-              />
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {documents.map(doc => (
-                  <div key={doc.id} className="flex items-center gap-3 px-4 py-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-900 truncate">{doc.fileName}</p>
-                      <p className="text-xs text-slate-500">{doc.fileType} · {Number(doc.fileSizeMb ?? 0).toFixed(2)} MB</p>
-                    </div>
-                    {docStatusBadge(doc.status)}
-                    <button
-                      onClick={() => deleteDocument(doc.id)}
-                      className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
+      {/* Knowledge tab: base de conocimiento consultada por el runtime IA */}
+      {activeTab === 'knowledge' && <KnowledgeTab />}
 
       {/* Training tab */}
       {activeTab === 'training' && (
-        <Card>
-          <CardHeader title="Entrenamiento del agente" description="Define el comportamiento de tus agentes" />
+        <div className="space-y-4">
+          <Alert variant="info">
+            Este contexto se inyecta en el prompt de <strong>todos los agentes</strong> de tu empresa,
+            tanto en la prueba interna como en WhatsApp real. La clave de OpenAI nunca se expone aquí.
+          </Alert>
+
           {loading ? (
             <div className="flex justify-center py-10"><LoadingSpinner /></div>
           ) : (
-            <div className="space-y-4">
-              {tf('generalInstructions', 'Instrucciones generales de la empresa', 3)}
-              {tf('communicationTone', 'Tono de comunicación')}
-              {tf('avoidWords', 'Palabras/frases a evitar')}
-              {tf('faq', 'Preguntas frecuentes', 4)}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>{tf('deliveryPolicy', 'Políticas de entrega')}</div>
-                <div>{tf('returnPolicy', 'Políticas de devolución')}</div>
-                <div>{tf('schedule', 'Horarios de atención')}</div>
-                <div>{tf('locations', 'Ubicaciones')}</div>
+            <>
+              {/* 1. Información general */}
+              <Card>
+                <CardHeader title="Información general" description="Quién es el negocio y cómo debe comunicarse" />
+                <div className="space-y-4">
+                  {tf('businessDescription', 'Descripción del negocio', 3, 'Ej: Salón de belleza en Santo Domingo especializado en uñas y cuidado del cabello.')}
+                  {tf('customInstructions', 'Instrucciones personalizadas para el agente', 3, 'Ej: Siempre saluda por el nombre. Ofrece agendar cita al final.')}
+                  {tf('communicationTone', 'Tono de respuesta', 2, 'Ej: Cercano, amable y breve. Estilo WhatsApp.')}
+                </div>
+              </Card>
+
+              {/* 2. Servicios y precios */}
+              <Card>
+                <CardHeader title="Servicios y precios" description="El agente NO inventará precios fuera de esta lista" />
+                <div className="space-y-3">
+                  {training.services.length === 0 && (
+                    <p className="text-sm text-slate-400">Aún no has agregado servicios.</p>
+                  )}
+                  {training.services.map((srv, i) => (
+                    <div key={i} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-start border border-slate-100 rounded-xl p-3">
+                      <input
+                        className="input sm:col-span-3"
+                        placeholder="Nombre"
+                        value={srv.name}
+                        onChange={e => updateService(i, 'name', e.target.value)}
+                      />
+                      <input
+                        className="input sm:col-span-4"
+                        placeholder="Descripción (opcional)"
+                        value={srv.description || ''}
+                        onChange={e => updateService(i, 'description', e.target.value)}
+                      />
+                      <input
+                        className="input sm:col-span-2"
+                        placeholder="Precio / rango"
+                        value={srv.price || ''}
+                        onChange={e => updateService(i, 'price', e.target.value)}
+                      />
+                      <input
+                        className="input sm:col-span-2"
+                        placeholder="Notas"
+                        value={srv.notes || ''}
+                        onChange={e => updateService(i, 'notes', e.target.value)}
+                      />
+                      <button
+                        onClick={() => removeService(i)}
+                        className="sm:col-span-1 flex justify-center p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg"
+                        title="Quitar servicio"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={addService}>
+                    Agregar servicio
+                  </Button>
+                </div>
+              </Card>
+
+              {/* 3. Preguntas frecuentes */}
+              <Card>
+                <CardHeader title="Preguntas frecuentes" description="Respuestas que el agente puede usar directamente" />
+                <div className="space-y-3">
+                  {training.faqs.length === 0 && (
+                    <p className="text-sm text-slate-400">Aún no has agregado preguntas frecuentes.</p>
+                  )}
+                  {training.faqs.map((faq, i) => (
+                    <div key={i} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-start border border-slate-100 rounded-xl p-3">
+                      <input
+                        className="input sm:col-span-5"
+                        placeholder="Pregunta"
+                        value={faq.question}
+                        onChange={e => updateFaq(i, 'question', e.target.value)}
+                      />
+                      <input
+                        className="input sm:col-span-6"
+                        placeholder="Respuesta"
+                        value={faq.answer || ''}
+                        onChange={e => updateFaq(i, 'answer', e.target.value)}
+                      />
+                      <button
+                        onClick={() => removeFaq(i)}
+                        className="sm:col-span-1 flex justify-center p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg"
+                        title="Quitar pregunta"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" icon={<Plus className="h-3.5 w-3.5" />} onClick={addFaq}>
+                    Agregar pregunta
+                  </Button>
+                </div>
+              </Card>
+
+              {/* 4. Horarios y ubicación */}
+              <Card>
+                <CardHeader title="Horarios y ubicación" />
+                <div className="space-y-4">
+                  {tf('schedule', 'Horario de atención', 2, 'Ej: Lunes a sábado de 9:00 AM a 7:00 PM.')}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {tf('address', 'Dirección')}
+                    {tf('serviceAreas', 'Zonas de servicio (si aplica)')}
+                  </div>
+                </div>
+              </Card>
+
+              {/* 5. Políticas */}
+              <Card>
+                <CardHeader title="Políticas" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {pf('appointments', 'Citas')}
+                  {pf('cancellations', 'Cancelaciones')}
+                  {pf('deliveries', 'Entregas')}
+                  {pf('returns', 'Devoluciones')}
+                  {pf('warranties', 'Garantías')}
+                </div>
+              </Card>
+
+              {/* 6. Escalamiento a humano */}
+              <Card>
+                <CardHeader title="Escalamiento a humano" description="Cuándo el agente debe pasar la conversación a una persona" />
+                <div className="space-y-4">
+                  {tf('escalationRules', 'Reglas de escalamiento', 3, 'Ej: Si el cliente pide un precio no configurado, insiste en hablar con alguien, o expresa urgencia.')}
+                  {tf('forbiddenTopics', 'Temas o palabras a evitar', 2)}
+                </div>
+              </Card>
+
+              {/* 7. Mensajes */}
+              <Card>
+                <CardHeader title="Mensajes" />
+                <div className="space-y-4">
+                  {tf('welcomeMessage', 'Mensaje de bienvenida')}
+                  {tf('outOfHoursMessage', 'Mensaje fuera de horario')}
+                  {tf('fallbackMessage', 'Cuando no entiende la consulta')}
+                </div>
+              </Card>
+
+              <div className="flex justify-end">
+                <Button loading={saving} onClick={saveTraining}>
+                  Guardar configuración
+                </Button>
               </div>
-              {tf('escalationRules', 'Reglas de escalamiento a humano')}
-              {tf('welcomeMessage', 'Mensaje de bienvenida')}
-              {tf('unknownMessage', 'Cuando no entiende la consulta')}
-              {tf('offHoursMessage', 'Mensaje fuera de horario')}
-              <Button loading={saving} onClick={saveTraining} className="mt-2">
-                Guardar configuración
-              </Button>
-            </div>
+
+              {/* Probar agente con este contexto */}
+              <Card>
+                <CardHeader
+                  title="Probar agente con este contexto"
+                  description="Guarda primero para que el agente use la configuración actual."
+                />
+                {agents.length === 0 ? (
+                  <EmptyState
+                    icon={<Play className="h-8 w-8" />}
+                    title="No hay agentes para probar"
+                    description="Crea un agente en la sección Agentes."
+                  />
+                ) : (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="label">Agente</label>
+                        <select
+                          className="input"
+                          value={testAgentId}
+                          onChange={e => setTestAgentId(e.target.value)}
+                        >
+                          {agents.map(a => (
+                            <option key={a.id} value={a.id}>
+                              {a.name}{a.status !== 'ACTIVE' ? ' (inactivo)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="label">Mensaje de prueba</label>
+                        <input
+                          className="input"
+                          value={testMessage}
+                          onChange={e => setTestMessage(e.target.value)}
+                          placeholder={SAMPLE_TEST_MESSAGE}
+                        />
+                      </div>
+                    </div>
+
+                    <Button
+                      icon={<Send className="h-4 w-4" />}
+                      loading={testLoading}
+                      disabled={!testAgentId || !testMessage.trim()}
+                      onClick={runTest}
+                    >
+                      Probar
+                    </Button>
+
+                    {testError && <Alert variant="danger">{testError}</Alert>}
+
+                    {testResult && (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-sm text-slate-800 whitespace-pre-wrap">
+                        {testResult.reply}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </Card>
+            </>
           )}
-        </Card>
+        </div>
       )}
 
       {/* WhatsApp tab */}

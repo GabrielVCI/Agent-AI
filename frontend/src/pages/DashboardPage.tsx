@@ -13,6 +13,7 @@ import Badge from '../components/ui/Badge'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Alert from '../components/ui/Alert'
 import api from '../lib/api'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import {
   normalizeDashboardSummary,
   normalizeDashboardByPhone,
@@ -45,8 +46,9 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const load = async () => {
-    setLoading(true)
+  // silent=true refresca datos sin mostrar el spinner (polling de fondo)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
     setError('')
     // allSettled: un endpoint que falle (p.ej. 403) no rompe el resto del dashboard.
     const [s, p, a, act, q, au, al] = await Promise.allSettled([
@@ -77,6 +79,9 @@ export default function DashboardPage() {
 
   useEffect(() => { load() }, [])
 
+  // Métricas casi en tiempo real: refresco silencioso cada 30s (pausa con la pestaña oculta)
+  useAutoRefresh(() => load(true), 30_000)
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -86,7 +91,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="p-6 space-y-8 max-w-screen-2xl">
+    <div className="p-4 lg:p-6 space-y-8 max-w-screen-2xl mx-auto w-full">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -94,7 +99,7 @@ export default function DashboardPage() {
           <p className="text-sm text-slate-500">Métricas del mes actual</p>
         </div>
         <button
-          onClick={load}
+          onClick={() => load()}
           className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
         >
           <RefreshCw className="h-4 w-4" />

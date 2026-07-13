@@ -1,0 +1,90 @@
+import api from '../lib/api'
+
+// ─── Tipos (espejo del contrato /api/catalog del backend) ───────────────────
+
+export type CatalogItemType = 'PRODUCT' | 'SERVICE'
+
+export interface CatalogCategory {
+  id: string
+  name: string
+  description: string | null
+  isActive: boolean
+  itemCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CatalogItem {
+  id: string
+  name: string
+  description: string | null
+  type: CatalogItemType
+  categoryId: string | null
+  category: { id: string; name: string } | null
+  price: number
+  /** Porcentaje: 18 = 18% */
+  taxRate: number
+  priceIncludesTax: boolean
+  /** null para servicios */
+  quantity: number | null
+  sku: string | null
+  unit: string
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CatalogItemInput {
+  name: string
+  description?: string | null
+  type: CatalogItemType
+  categoryId?: string | null
+  price: number
+  taxRate?: number
+  priceIncludesTax?: boolean
+  quantity?: number | null
+  sku?: string | null
+  isActive?: boolean
+}
+
+export interface ItemFilters {
+  search?: string
+  categoryId?: string
+  type?: CatalogItemType
+  status?: 'active' | 'inactive'
+}
+
+// ─── Categorías ──────────────────────────────────────────────────────────────
+
+export const catalogApi = {
+  listCategories: () => api.get<CatalogCategory[]>('/api/catalog/categories'),
+
+  createCategory: (data: { name: string; description?: string | null }) =>
+    api.post<CatalogCategory>('/api/catalog/categories', data),
+
+  updateCategory: (id: string, data: { name?: string; description?: string | null }) =>
+    api.put<CatalogCategory>(`/api/catalog/categories/${id}`, data),
+
+  setCategoryStatus: (id: string, isActive: boolean) =>
+    api.patch<CatalogCategory>(`/api/catalog/categories/${id}/status`, { isActive }),
+
+  deleteCategory: (id: string) =>
+    api.delete<{ deleted: boolean; deactivated: boolean; productCount: number }>(
+      `/api/catalog/categories/${id}`
+    ),
+
+  // ─── Ítems ─────────────────────────────────────────────────────────────────
+
+  listItems: (filters: ItemFilters = {}) =>
+    api.get<CatalogItem[]>('/api/catalog/items', filters as Record<string, string | undefined>),
+
+  createItem: (data: CatalogItemInput) => api.post<CatalogItem>('/api/catalog/items', data),
+
+  updateItem: (id: string, data: Partial<CatalogItemInput>) =>
+    api.put<CatalogItem>(`/api/catalog/items/${id}`, data),
+
+  setItemStatus: (id: string, isActive: boolean) =>
+    api.patch<CatalogItem>(`/api/catalog/items/${id}/status`, { isActive }),
+
+  deleteItem: (id: string) => api.delete<{ deleted: boolean }>(`/api/catalog/items/${id}`),
+}

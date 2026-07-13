@@ -80,6 +80,8 @@ export interface Agent {
   aiModel: string
   allowAudio: boolean
   allowHumanIntervention: boolean
+  allowVoiceCalls: boolean
+  elevenLabsAgentId?: string
   createdAt?: string
   updatedAt?: string
   stats?: AgentStats
@@ -100,6 +102,7 @@ export type AgentIntent =
   | 'REMOVE_FROM_QUOTE'
   | 'GENERATE_QUOTE'
   | 'ASK_RECOMMENDATION'
+  | 'SCHEDULE_APPOINTMENT'
   | 'HUMAN_HANDOFF'
   | 'UNKNOWN'
 
@@ -115,6 +118,31 @@ export interface AgentAction {
   payload?: Record<string, unknown>
 }
 
+/** Clasificación conversacional del mensaje (control de calidad/gasto). */
+export type ConversationIntent =
+  | 'GREETING'
+  | 'PRODUCT_INQUIRY'
+  | 'SERVICE_INQUIRY'
+  | 'QUOTE_REQUEST'
+  | 'APPOINTMENT_REQUEST'
+  | 'SUPPORT_REQUEST'
+  | 'HUMAN_REQUEST'
+  | 'COMPLAINT'
+  | 'OFF_TOPIC'
+  | 'SPAM'
+  | 'WRONG_NUMBER'
+  | 'UNKNOWN'
+
+/** Resultado del turno: si la conversación avanza o hay que cortarla/escalarla. */
+export type ConversationOutcome =
+  | 'PRODUCTIVE'
+  | 'NEEDS_INFO'
+  | 'NEEDS_HUMAN'
+  | 'NOT_RELATED'
+  | 'SPAM'
+  | 'WRONG_NUMBER'
+  | 'COMPLETED'
+
 export interface AgentDecision {
   intent: AgentIntent
   replyText: string
@@ -122,12 +150,21 @@ export interface AgentDecision {
   actions: AgentAction[]
   requiresHuman: boolean
   confidence: number
+  conversationIntent?: ConversationIntent
+  outcome?: ConversationOutcome
 }
 
 export interface AiUsage {
   inputTokens: number
   outputTokens: number
   totalTokens: number
+}
+
+/** Acción que el runtime IA ejecutó (o describiría en modo prueba). */
+export interface AgentRuntimeAction {
+  type: string
+  executed: boolean
+  detail: string
 }
 
 /** Respuesta real de POST /api/agents/:id/test */
@@ -137,6 +174,13 @@ export interface AgentTestResult {
   reply: string
   usage: AiUsage
   decision: AgentDecision
+  actions: AgentRuntimeAction[]
+  conversationIntent: ConversationIntent
+  outcome: ConversationOutcome
+  confidence: number
+  requiresHuman: boolean
+  /** Razón de corte por control de gasto (null si el turno fue normal). */
+  costControlReason: string | null
 }
 
 /** Payload que el frontend envía al crear/editar un agente. */
@@ -152,20 +196,27 @@ export interface AgentInput {
   aiModel?: string
   allowAudio?: boolean
   allowHumanIntervention?: boolean
+  allowVoiceCalls?: boolean
+  elevenLabsAgentId?: string
 }
 
 export type MessageType = 'TEXT' | 'AUDIO' | 'IMAGE' | 'DOCUMENT' | 'SYSTEM'
 export type ConversationStatus = 'BOT_ACTIVE' | 'HUMAN_ACTIVE' | 'CLOSED' | 'UNRESOLVED'
+
+export type MessageSender = 'CUSTOMER' | 'AGENT' | 'HUMAN' | 'SYSTEM'
 
 export interface Message {
   id: string
   conversationId: string
   direction: 'INBOUND' | 'OUTBOUND'
   type: MessageType
+  senderType?: MessageSender
   content?: string
   mediaUrl?: string
   transcription?: string
-  transcriptionStatus?: 'PENDING' | 'SUCCESS' | 'FAILED'
+  transcriptionStatus?: 'PENDING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'DISABLED'
+  /** Proveedor que transcribió el audio (elevenlabs | openai) */
+  transcriptionProvider?: string
   senderName?: string
   sentAt: string
   isFromBot: boolean
@@ -176,6 +227,7 @@ export interface Conversation {
   contactName?: string
   contactPhone: string
   whatsappNumber: string
+  agentId?: string
   agentName?: string
   status: ConversationStatus
   lastMessage?: string
@@ -184,6 +236,11 @@ export interface Conversation {
   hasQuote?: boolean
   hasAudio?: boolean
   operatorName?: string
+  assignedToId?: string
+  labels?: { id: string; name: string; color: string }[]
+  needsHuman?: boolean
+  awaitingReply?: boolean
+  channel?: 'WHATSAPP' | 'VOICE'
 }
 
 export interface Invoice {
@@ -267,6 +324,16 @@ export interface AdminTenant {
   lastAccessAt?: string
   usedConversations: number
   usedAudioMinutes: number
+  /** Consumo del mes calendario actual (contador de billing) */
+  usageMessages: number
+  usageLimit: number
+  usageExceeded: boolean
+  /** Venta manual: precio efectivo (custom > plan) y cobro */
+  monthlyPrice: number | null
+  planCurrency: string
+  billingMode: string | null
+  paymentStatus: string | null
+  nextBillingDate: string | null
 }
 
 export interface CancellationRequest {

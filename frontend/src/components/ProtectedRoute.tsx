@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { UserRole } from '../types'
 import LoadingSpinner from './ui/LoadingSpinner'
 import ForbiddenPage from '../pages/ForbiddenPage'
+import { SendwaryWordmark } from './BrandLogo'
 
 interface ProtectedRouteProps {
   allowedRoles?: UserRole[]
@@ -16,7 +17,8 @@ export default function ProtectedRoute({ allowedRoles, requireTenant }: Protecte
   // Esperamos a que termine la verificación de sesión antes de decidir nada.
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+      <div className="min-h-screen flex flex-col items-center justify-center gap-6 bg-slate-50">
+        <SendwaryWordmark markClassName="h-11 w-11" textClassName="text-2xl" />
         <LoadingSpinner size="lg" />
       </div>
     )
@@ -27,12 +29,13 @@ export default function ProtectedRoute({ allowedRoles, requireTenant }: Protecte
   }
 
   // Páginas tenant (dashboard, agentes, etc.): un usuario sin empresa no debe montarlas.
-  // SUPER_ADMIN (tenantId null) se redirige a su panel admin; cualquier otro caso → 403.
+  // SUPER_ADMIN (tenantId null) va a su panel admin; usuarios recién registrados
+  // sin empresa van al onboarding para crearla.
   if (requireTenant && !user.tenantId) {
     if (user.role === 'SUPER_ADMIN') {
       return <Navigate to="/admin" replace />
     }
-    return <ForbiddenPage />
+    return <Navigate to="/onboarding" replace />
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { CreditCard, Download, CheckCircle2, XCircle, Clock } from 'lucide-react'
+import { useEffect, useState, FormEvent } from 'react'
+import { CreditCard, Download, CheckCircle2, XCircle, Clock, LifeBuoy } from 'lucide-react'
 import { Subscription, Invoice } from '../types'
 import api from '../lib/api'
 import { Card, CardHeader, StatCard } from '../components/ui/Card'
@@ -8,6 +8,9 @@ import Button from '../components/ui/Button'
 import Modal from '../components/ui/Modal'
 import Alert from '../components/ui/Alert'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
+import UsageCard from '../components/billing/UsageCard'
+import VoiceUsageCard from '../components/billing/VoiceUsageCard'
+import PlanCards from '../components/billing/PlanCards'
 
 type CancelReason =
   | 'too_expensive'
@@ -29,6 +32,120 @@ type InvoicesApiResponse = {
   data?: unknown
   invoices?: unknown
   items?: unknown
+}
+
+// ─── Solicitar soporte (Parte H): ticket simple anclado al tenant ────────────
+
+const supportModules = [
+  'WhatsApp', 'Agentes IA', 'Conversaciones', 'Catálogo', 'Citas',
+  'Llamadas', 'Facturación', 'Cuenta/acceso', 'Otro',
+]
+
+function SupportRequestCard() {
+  const [open, setOpen] = useState(false)
+  const [subject, setSubject] = useState('')
+  const [description, setDescription] = useState('')
+  const [module, setModule] = useState(supportModules[0])
+  const [priority, setPriority] = useState('Normal')
+  const [sending, setSending] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
+
+  const inputCls =
+    'w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition'
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setSending(true)
+    setError('')
+    try {
+      // El backend ancla el ticket al tenant del usuario (no puede ver otros)
+      await api.post('/api/support/tickets', {
+        title: `[${module}] ${subject.trim()}`,
+        description: `Prioridad indicada: ${priority}\n\n${description.trim()}`,
+        category: module,
+      })
+      setSent(true)
+    } catch (err: unknown) {
+      const er = err as { message?: string }
+      setError(er?.message || 'No se pudo enviar la solicitud')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const reset = () => {
+    setOpen(false)
+    setSent(false)
+    setSubject('')
+    setDescription('')
+    setError('')
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title="Soporte"
+        description="¿Algo no funciona como esperas? Nuestro equipo (y su asistente IA) lo revisará."
+      />
+      <Button variant="outline" icon={<LifeBuoy className="h-4 w-4" />} onClick={() => setOpen(true)}>
+        Solicitar soporte
+      </Button>
+
+      <Modal open={open} onClose={reset} title="Solicitar soporte">
+        {sent ? (
+          <div className="space-y-4">
+            <Alert variant="success">
+              Solicitud enviada. El equipo de Sendwary dará seguimiento a tu caso.
+            </Alert>
+            <div className="flex justify-end">
+              <Button onClick={reset}>Cerrar</Button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="space-y-3">
+            {error && <Alert variant="danger">{error}</Alert>}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Asunto</label>
+              <input value={subject} onChange={e => setSubject(e.target.value)} required minLength={4} className={inputCls} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">Módulo</label>
+                <select value={module} onChange={e => setModule(e.target.value)} className={inputCls}>
+                  {supportModules.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">Prioridad</label>
+                <select value={priority} onChange={e => setPriority(e.target.value)} className={inputCls}>
+                  {['Baja', 'Normal', 'Alta', 'Urgente'].map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Descripción</label>
+              <textarea
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                required
+                minLength={10}
+                rows={4}
+                placeholder="Qué pasó, desde cuándo y pasos para reproducirlo…"
+                className={inputCls}
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-1">
+              <Button type="button" variant="secondary" onClick={reset} disabled={sending}>
+                Cancelar
+              </Button>
+              <Button type="submit" loading={sending}>Enviar</Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+    </Card>
+  )
 }
 
 const cancelReasons: { value: CancelReason; label: string }[] = [
@@ -299,6 +416,7 @@ function usageBar(usedRaw: unknown, maxRaw: unknown) {
 
 export default function AccountPage() {
   const [sub, setSub] = useState<Subscription | null>(null)
+  const [currentPlanCode, setCurrentPlanCode] = useState<string | null>(null)
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [loading, setLoading] = useState(true)
   const [pageError, setPageError] = useState('')
@@ -377,7 +495,7 @@ export default function AccountPage() {
   }
 
   return (
-    <div className="p-6 max-w-3xl space-y-6">
+    <div className="p-4 lg:p-6 max-w-screen-2xl mx-auto w-full space-y-4">
       <div className="flex items-center gap-3">
         <div className="h-10 w-10 rounded-xl bg-primary-100 flex items-center justify-center">
           <CreditCard className="h-5 w-5 text-primary-600" />
@@ -395,8 +513,20 @@ export default function AccountPage() {
         </Alert>
       )}
 
+      {/* Consumo del plan + minutos de voz lado a lado en desktop */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+        {/* Consumo del plan en tiempo real (fuente: /api/billing/usage) */}
+        <UsageCard onPlanCode={setCurrentPlanCode} />
+
+        {/* Minutos de llamadas IA (Enterprise) */}
+        <VoiceUsageCard />
+      </div>
+
+      {/* Planes Sendwary con checkout preparado (overlay LemonSqueezy) */}
+      <PlanCards currentPlanCode={currentPlanCode} />
+
       {sub ? (
-        <>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
           <Card>
             <div className="flex items-start justify-between mb-4">
               <div>
@@ -454,7 +584,7 @@ export default function AccountPage() {
             )}
           </Card>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-4 xl:col-start-1">
             <StatCard
               label="Agentes"
               value={`${toNumber(sub.plan?.maxAgents)} máx.`}
@@ -508,7 +638,7 @@ export default function AccountPage() {
               </div>
             </div>
           </Card>
-        </>
+        </div>
       ) : (
         <Card>
           <div className="py-8 text-center">
@@ -519,6 +649,7 @@ export default function AccountPage() {
         </Card>
       )}
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
       <Card padding="none">
         <div className="p-6 border-b border-slate-100">
           <h3 className="font-semibold text-slate-900">Historial de facturación</h3>
@@ -588,18 +719,24 @@ export default function AccountPage() {
         )}
       </Card>
 
-      {sub?.status === 'ACTIVE' && (
-        <Card>
-          <CardHeader
-            title="Cancelar suscripción"
-            description="Tu cuenta permanecerá activa hasta el fin del período actual."
-          />
+      <div className="space-y-4">
+        {/* Solicitar soporte (crea un ticket para el equipo de Sendwary) */}
+        <SupportRequestCard />
 
-          <Button variant="danger" onClick={() => setCancelModal(true)}>
-            Solicitar cancelación
-          </Button>
-        </Card>
-      )}
+        {sub?.status === 'ACTIVE' && (
+          <Card>
+            <CardHeader
+              title="Cancelar suscripción"
+              description="Tu cuenta permanecerá activa hasta el fin del período actual."
+            />
+
+            <Button variant="danger" onClick={() => setCancelModal(true)}>
+              Solicitar cancelación
+            </Button>
+          </Card>
+        )}
+      </div>
+      </div>
 
       <Modal
         open={cancelModal}

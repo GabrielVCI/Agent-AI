@@ -2,8 +2,9 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import {
   Search, Send, Bot, User, Mic, Image, FileText,
   ChevronLeft, PhoneCall, XCircle, AlertCircle, MessageSquare,
+  UserPlus, PanelRight,
 } from 'lucide-react'
-import { Conversation, Message, ConversationStatus } from '../types'
+import { Conversation, Message, ConversationStatus, Agent } from '../types'
 import {
   listConversations,
   getConversationMessages,
@@ -11,22 +12,47 @@ import {
   takeoverConversation,
   releaseConversationToAgent,
   closeConversation as closeConversationApi,
+  labelsApi,
+  assignConversation,
+  unassignConversation,
+  listTenantUsers,
+  InboxLabel,
+  TenantUser,
 } from '../services/conversationsApi'
+import { listAgents } from '../services/agentsApi'
+import { useAuth } from '../contexts/AuthContext'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import ContactPanel, { LabelChip } from '../components/inbox/ContactPanel'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import EmptyState from '../components/ui/EmptyState'
 
-type FilterType = 'ALL' | 'BOT_ACTIVE' | 'HUMAN_ACTIVE' | 'CLOSED' | 'UNRESOLVED' | 'WITH_QUOTE' | 'WITH_AUDIO'
+/**
+ * Filtros rápidos del inbox (estilo respond.io). Los marcados como `server`
+ * recargan desde el backend; el resto filtra la lista ya cargada.
+ */
+type FilterType =
+  | 'ALL'
+  | 'AWAITING'
+  | 'NEEDS_HUMAN'
+  | 'MINE'
+  | 'UNASSIGNED'
+  | 'BOT_ACTIVE'
+  | 'HUMAN_ACTIVE'
+  | 'CLOSED'
+  | 'WITH_QUOTE'
 
-const filters: { label: string; value: FilterType }[] = [
+const filters: { label: string; value: FilterType; server?: boolean }[] = [
   { label: 'Todas', value: 'ALL' },
-  { label: 'Bot activo', value: 'BOT_ACTIVE' },
+  { label: 'Por responder', value: 'AWAITING', server: true },
+  { label: 'Requieren humano', value: 'NEEDS_HUMAN', server: true },
+  { label: 'Asignadas a mí', value: 'MINE', server: true },
+  { label: 'Sin asignar', value: 'UNASSIGNED', server: true },
+  { label: 'Modo IA', value: 'BOT_ACTIVE', server: true },
   { label: 'Intervenidas', value: 'HUMAN_ACTIVE' },
-  { label: 'Cerradas', value: 'CLOSED' },
-  { label: 'Sin responder', value: 'UNRESOLVED' },
+  { label: 'Cerradas', value: 'CLOSED', server: true },
   { label: 'Con cotización', value: 'WITH_QUOTE' },
-  { label: 'Con audio', value: 'WITH_AUDIO' },
 ]
 
 function statusBadge(status: ConversationStatus) {
@@ -46,6 +72,22 @@ function formatTime(iso: string): string {
   return d.toLocaleDateString('es', { day: '2-digit', month: 'short' })
 }
 
+/** Log de demo: solo en desarrollo, nunca en producción. */
+function clog(...args: unknown[]): void {
+  if (import.meta.env.DEV) console.log('[CONVERSATIONS]', ...args)
+}
+
+/** Etiqueta del remitente de un mensaje saliente (IA / asesor / sistema). */
+function outboundSenderLabel(msg: Message): string | null {
+  if (msg.direction !== 'OUTBOUND') return null
+  switch (msg.senderType) {
+    case 'HUMAN': return 'Asesor'
+    case 'SYSTEM': return 'Sistema'
+    case 'AGENT': return 'IA'
+    default: return msg.isFromBot ? 'IA' : null
+  }
+}
+
 export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [filtered, setFiltered] = useState<Conversation[]>([])
@@ -53,6 +95,14 @@ export default function ConversationsPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [filter, setFilter] = useState<FilterType>('ALL')
   const [search, setSearch] = useState('')
+  const { user } = useAuth()
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [agentFilter, setAgentFilter] = useState('')
+  const [labels, setLabels] = useState<InboxLabel[]>([])
+  const [labelFilter, setLabelFilter] = useState('')
+  const [users, setUsers] = useState<TenantUser[]>([])
+  const [showProfile, setShowProfile] = useState(false)
+  const [assignOpen, setAssignOpen] = useState(false)
   const [reply, setReply] = useState('')
   const [loading, setLoading] = useState(true)
   const [msgLoading, setMsgLoading] = useState(false)
@@ -61,25 +111,69 @@ export default function ConversationsPage() {
   const [showChat, setShowChat] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  const loadConversations = useCallback(async () => {
-    setLoading(true)
+  const loadLabels = useCallback(() => {
+    labelsApi
+      .list()
+      .then(list => setLabels(Array.isArray(list) ? list : []))
+      .catch(() => setLabels([]))
+  }, [])
+
+  // silent=true refresca sin parpadeo de loading (polling de fondo)
+  const loadConversations = useCallback(async (silent = false) => {
+    clog('loading conversations')
+    if (!silent) setLoading(true)
     try {
-      const data = await listConversations()
+      const data = await listConversations({
+        agentId: agentFilter || undefined,
+        labelId: labelFilter || undefined,
+        awaiting: filter === 'AWAITING' || undefined,
+        pendingHuman: filter === 'NEEDS_HUMAN' || undefined,
+        assignedToMe: filter === 'MINE' || undefined,
+        unassigned: filter === 'UNASSIGNED' || undefined,
+        status: filter === 'BOT_ACTIVE' ? 'BOT_ACTIVE' : filter === 'CLOSED' ? 'CLOSED' : undefined,
+      })
       setConversations(data)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
-  }, [])
+  }, [agentFilter, labelFilter, filter])
 
   useEffect(() => { loadConversations() }, [loadConversations])
 
+  // Inbox casi en tiempo real (Parte I): lista cada 10s y, si hay un hilo
+  // abierto, sus mensajes; solo se re-renderiza si llegó algo nuevo.
+  useAutoRefresh(async () => {
+    try {
+      await loadConversations(true)
+      if (selected) {
+        const data = await getConversationMessages(selected.id)
+        setMessages(prev => {
+          const lastPrev = prev[prev.length - 1]?.id
+          const lastNew = data[data.length - 1]?.id
+          return prev.length === data.length && lastPrev === lastNew ? prev : data
+        })
+      }
+    } catch {
+      // fallo transitorio: el próximo tick reintenta
+    }
+  }, 10_000)
+
+  useEffect(() => {
+    // Catálogos auxiliares del inbox: si alguno falla, el inbox sigue operativo.
+    listAgents()
+      .then(list => setAgents(Array.isArray(list) ? list : []))
+      .catch(() => setAgents([]))
+    listTenantUsers()
+      .then(list => setUsers(Array.isArray(list) ? list : []))
+      .catch(() => setUsers([]))
+    loadLabels()
+  }, [loadLabels])
+
   useEffect(() => {
     let list = conversations
-    if (filter !== 'ALL') {
-      if (filter === 'WITH_QUOTE') list = list.filter(c => c.hasQuote)
-      else if (filter === 'WITH_AUDIO') list = list.filter(c => c.hasAudio)
-      else list = list.filter(c => c.status === filter)
-    }
+    // Los filtros `server` ya llegan filtrados del backend; aquí solo los locales
+    if (filter === 'WITH_QUOTE') list = list.filter(c => c.hasQuote)
+    else if (filter === 'HUMAN_ACTIVE') list = list.filter(c => c.status === 'HUMAN_ACTIVE')
     if (search) {
       const q = search.toLowerCase()
       list = list.filter(c =>
@@ -92,6 +186,7 @@ export default function ConversationsPage() {
   }, [conversations, filter, search])
 
   const selectConversation = async (conv: Conversation) => {
+    clog('selected conversation', conv.id)
     setSelected(conv)
     setShowChat(true)
     setMsgLoading(true)
@@ -109,6 +204,7 @@ export default function ConversationsPage() {
     setSending(true)
     try {
       await replyToConversation(selected.id, reply)
+      clog('manual reply sent', selected.id)
       setReply('')
       const data = await getConversationMessages(selected.id)
       setMessages(data)
@@ -120,6 +216,7 @@ export default function ConversationsPage() {
 
   const takeOver = async () => {
     if (!selected) return
+    clog('takeover requested', selected.id)
     setActionLoading(true)
     try {
       await takeoverConversation(selected.id)
@@ -132,11 +229,39 @@ export default function ConversationsPage() {
 
   const releaseToAgent = async () => {
     if (!selected) return
+    clog('release to agent requested', selected.id)
     setActionLoading(true)
     try {
       await releaseConversationToAgent(selected.id)
       await loadConversations()
       setSelected(prev => prev ? { ...prev, status: 'BOT_ACTIVE' } : prev)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const assignTo = async (userId: string | null) => {
+    if (!selected) return
+    setAssignOpen(false)
+    setActionLoading(true)
+    try {
+      if (userId) {
+        await assignConversation(selected.id, userId)
+      } else {
+        await unassignConversation(selected.id)
+      }
+      await loadConversations()
+      const target = users.find(u => u.id === userId)
+      setSelected(prev =>
+        prev
+          ? {
+              ...prev,
+              assignedToId: userId ?? undefined,
+              operatorName: target?.name,
+              status: userId ? 'HUMAN_ACTIVE' : prev.status,
+            }
+          : prev
+      )
     } finally {
       setActionLoading(false)
     }
@@ -172,15 +297,24 @@ export default function ConversationsPage() {
             }`}
           >
             {msg.type === 'AUDIO' ? (
-              <div className="flex items-center gap-2">
-                <Mic className={`h-4 w-4 ${isOut ? 'text-primary-200' : 'text-slate-400'}`} />
+              <div className="flex items-start gap-2">
+                <Mic className={`h-4 w-4 mt-0.5 flex-shrink-0 ${isOut ? 'text-primary-200' : 'text-slate-400'}`} />
                 <span className={isOut ? 'text-primary-100' : 'text-slate-500'}>
                   {msg.transcription ? (
-                    <span className="italic text-sm">{msg.transcription}</span>
+                    <span className="flex flex-col gap-0.5">
+                      <span className="italic text-sm">{msg.transcription}</span>
+                      <span className={`text-[11px] ${isOut ? 'text-primary-200' : 'text-slate-400'}`}>
+                        {msg.transcriptionProvider === 'elevenlabs'
+                          ? 'Transcrito con ElevenLabs'
+                          : 'Transcrito automáticamente'}
+                      </span>
+                    </span>
                   ) : msg.transcriptionStatus === 'FAILED' ? (
                     <span className="flex items-center gap-1 text-red-500">
-                      <AlertCircle className="h-3.5 w-3.5" />Audio no disponible
+                      <AlertCircle className="h-3.5 w-3.5" />No se pudo transcribir el audio.
                     </span>
+                  ) : msg.transcriptionStatus === 'SKIPPED' || msg.transcriptionStatus === 'DISABLED' ? (
+                    <span>Audio recibido (sin transcripción)</span>
                   ) : (
                     <span>Audio procesando...</span>
                   )}
@@ -200,7 +334,13 @@ export default function ConversationsPage() {
               msg.content
             )}
           </div>
-          <span className="text-xs text-slate-400 mt-1 px-1">{formatTime(msg.sentAt)}</span>
+          <span className="text-xs text-slate-400 mt-1 px-1">
+            {(() => {
+              const label = outboundSenderLabel(msg)
+              return label ? `${label} · ` : ''
+            })()}
+            {formatTime(msg.sentAt)}
+          </span>
         </div>
       </div>
     )
@@ -240,6 +380,36 @@ export default function ConversationsPage() {
               </button>
             ))}
           </div>
+          <div className="mt-2 flex gap-1.5">
+            {agents.length > 0 && (
+              <select
+                value={agentFilter}
+                onChange={e => setAgentFilter(e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-slate-600"
+              >
+                <option value="">Todos los agentes</option>
+                {agents.map(a => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {labels.length > 0 && (
+              <select
+                value={labelFilter}
+                onChange={e => setLabelFilter(e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 text-slate-600"
+              >
+                <option value="">Todas las etiquetas</option>
+                {labels.map(l => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -256,8 +426,19 @@ export default function ConversationsPage() {
                   selected?.id === conv.id ? 'bg-primary-50' : ''
                 }`}
               >
-                <div className="h-10 w-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0 font-medium text-slate-600 text-sm">
-                  {(conv.contactName || conv.contactPhone).charAt(0).toUpperCase()}
+                <div
+                  className={`h-10 w-10 rounded-full flex items-center justify-center flex-shrink-0 font-medium text-sm ${
+                    conv.channel === 'VOICE'
+                      ? 'bg-primary-100 text-primary-600'
+                      : 'bg-slate-200 text-slate-600'
+                  }`}
+                  title={conv.channel === 'VOICE' ? 'Llamada IA' : 'WhatsApp'}
+                >
+                  {conv.channel === 'VOICE' ? (
+                    <PhoneCall className="h-4 w-4" />
+                  ) : (
+                    (conv.contactName || conv.contactPhone).charAt(0).toUpperCase()
+                  )}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
@@ -271,17 +452,34 @@ export default function ConversationsPage() {
                     )}
                   </div>
                   <p className="text-xs text-slate-500 truncate mt-0.5">{conv.lastMessage || 'Sin mensajes'}</p>
-                  <div className="flex items-center gap-1.5 mt-1">
+                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                     {statusBadge(conv.status)}
-                    {conv.agentName && (
-                      <span className="text-xs text-slate-400 truncate">{conv.agentName}</span>
+                    {conv.needsHuman && (
+                      <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        Requiere humano
+                      </span>
+                    )}
+                    {(conv.labels ?? []).slice(0, 2).map(label => (
+                      <LabelChip key={label.id} label={label} />
+                    ))}
+                    {(conv.labels ?? []).length > 2 && (
+                      <span className="text-[10px] text-slate-400">+{conv.labels!.length - 2}</span>
+                    )}
+                    {conv.operatorName && (
+                      <span
+                        className="ml-auto h-5 w-5 rounded-full bg-primary-100 text-primary-700 text-[10px] font-semibold flex items-center justify-center flex-shrink-0"
+                        title={`Asignada a ${conv.operatorName}`}
+                      >
+                        {conv.operatorName.charAt(0).toUpperCase()}
+                      </span>
                     )}
                   </div>
                 </div>
-                {(conv.unreadCount ?? 0) > 0 && (
-                  <span className="flex-shrink-0 h-5 min-w-5 px-1 rounded-full bg-primary-600 text-white text-xs flex items-center justify-center">
-                    {conv.unreadCount}
-                  </span>
+                {conv.awaitingReply && conv.status !== 'CLOSED' && (
+                  <span
+                    className="flex-shrink-0 h-2.5 w-2.5 mt-1.5 rounded-full bg-primary-500"
+                    title="El cliente espera respuesta"
+                  />
                 )}
               </button>
             ))
@@ -313,16 +511,17 @@ export default function ConversationsPage() {
                   <span className="text-xs text-slate-400">{selected.whatsappNumber}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {selected.status === 'BOT_ACTIVE' && (
+              <div className="flex items-center gap-1.5">
+                {(selected.status === 'BOT_ACTIVE' || selected.status === 'CLOSED') && (
                   <Button
                     variant="outline"
                     size="sm"
                     icon={<PhoneCall className="h-3.5 w-3.5" />}
                     loading={actionLoading}
                     onClick={takeOver}
+                    title={selected.status === 'CLOSED' ? 'Reabrir y atender' : 'Tomar el control'}
                   >
-                    Tomar
+                    {selected.status === 'CLOSED' ? 'Reabrir' : 'Tomar'}
                   </Button>
                 )}
                 {selected.status === 'HUMAN_ACTIVE' && (
@@ -336,6 +535,51 @@ export default function ConversationsPage() {
                     Devolver a IA
                   </Button>
                 )}
+
+                {/* Asignar a usuario del equipo */}
+                <div className="relative">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<UserPlus className="h-3.5 w-3.5" />}
+                    onClick={() => setAssignOpen(v => !v)}
+                    title={selected.operatorName ? `Asignada a ${selected.operatorName}` : 'Asignar a…'}
+                  >
+                    <span className="hidden sm:inline">
+                      {selected.operatorName ? selected.operatorName.split(' ')[0] : 'Asignar'}
+                    </span>
+                  </Button>
+                  {assignOpen && (
+                    <div className="absolute right-0 top-full mt-1 w-52 bg-white rounded-xl border border-slate-200 shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
+                      {users.map(u => (
+                        <button
+                          key={u.id}
+                          onClick={() => assignTo(u.id)}
+                          className={`flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 ${
+                            selected.assignedToId === u.id ? 'text-primary-700 font-medium' : 'text-slate-600'
+                          }`}
+                        >
+                          <span className="h-6 w-6 rounded-full bg-primary-100 text-primary-700 text-xs font-semibold flex items-center justify-center flex-shrink-0">
+                            {u.name.charAt(0).toUpperCase()}
+                          </span>
+                          <span className="truncate">
+                            {u.name}
+                            {u.id === user?.id ? ' (yo)' : ''}
+                          </span>
+                        </button>
+                      ))}
+                      {selected.assignedToId && (
+                        <button
+                          onClick={() => assignTo(null)}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 border-t border-slate-100"
+                        >
+                          Quitar asignación
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {selected.status !== 'CLOSED' && (
                   <Button
                     variant="ghost"
@@ -344,9 +588,22 @@ export default function ConversationsPage() {
                     loading={actionLoading}
                     onClick={closeConv}
                   >
-                    Cerrar
+                    <span className="hidden sm:inline">Cerrar</span>
                   </Button>
                 )}
+
+                {/* Panel de perfil del contacto */}
+                <button
+                  onClick={() => setShowProfile(v => !v)}
+                  className={`p-2 rounded-lg transition-colors ${
+                    showProfile
+                      ? 'bg-primary-50 text-primary-600'
+                      : 'text-slate-500 hover:bg-slate-100'
+                  }`}
+                  title="Perfil del contacto"
+                >
+                  <PanelRight className="h-4 w-4" />
+                </button>
               </div>
             </div>
 
@@ -418,6 +675,43 @@ export default function ConversationsPage() {
           </div>
         )}
       </div>
+
+      {/* Panel de contacto: tercera columna en pantallas grandes, drawer en el resto */}
+      {selected && showProfile && (
+        <>
+          <aside className="hidden xl:flex flex-col w-80 flex-shrink-0 border-l border-slate-200 bg-white">
+            <ContactPanel
+              key={selected.id}
+              conversationId={selected.id}
+              allLabels={labels}
+              onLabelsCreated={loadLabels}
+              onChanged={loadConversations}
+              onClose={() => setShowProfile(false)}
+              onCloseConversation={() => {
+                setShowProfile(false)
+                closeConv()
+              }}
+            />
+          </aside>
+          <div className="fixed inset-0 z-40 xl:hidden">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setShowProfile(false)} />
+            <div className="absolute inset-y-0 right-0 w-full max-w-sm bg-white shadow-2xl">
+              <ContactPanel
+                key={selected.id}
+                conversationId={selected.id}
+                allLabels={labels}
+                onLabelsCreated={loadLabels}
+                onChanged={loadConversations}
+                onClose={() => setShowProfile(false)}
+                onCloseConversation={() => {
+                  setShowProfile(false)
+                  closeConv()
+                }}
+              />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

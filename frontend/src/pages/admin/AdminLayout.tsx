@@ -1,10 +1,11 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Users, XCircle, LayoutDashboard } from 'lucide-react'
+import { Users, XCircle, LayoutDashboard, LifeBuoy } from 'lucide-react'
 
 const adminNav = [
   { path: '/admin', label: 'Resumen', icon: <LayoutDashboard className="h-4 w-4" />, exact: true },
   { path: '/admin/clientes', label: 'Clientes', icon: <Users className="h-4 w-4" /> },
   { path: '/admin/solicitudes-cancelacion', label: 'Cancelaciones', icon: <XCircle className="h-4 w-4" /> },
+  { path: '/admin/soporte', label: 'Soporte', icon: <LifeBuoy className="h-4 w-4" /> },
 ]
 
 export default function AdminLayout() {
