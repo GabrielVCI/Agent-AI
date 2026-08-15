@@ -1,6 +1,6 @@
 /**
  * Opciones, tipos y validación del formulario de contacto.
- * Reutilizado por ContactForm y como contrato con la Netlify Function.
+ * Reutilizado por ContactForm y como contrato con Web3Forms.
  */
 
 export interface ContactFormData {
@@ -85,20 +85,49 @@ export const initialContactData: ContactFormData = {
 
 export type ContactErrors = Partial<Record<keyof ContactFormData, string>>
 
+/** Longitudes máximas permitidas por campo. */
+export const CONTACT_MAX = {
+  nombre: 120,
+  telefono: 40,
+  email: 160,
+  negocio: 120,
+  sistemaActual: 120,
+  mensaje: 1500,
+} as const
+
 /** Validación en frontend. Devuelve un mapa de errores por campo (vacío = válido). */
 export function validateContact(data: ContactFormData): ContactErrors {
   const errors: ContactErrors = {}
 
   if (!data.nombre.trim()) errors.nombre = 'Ingresa tu nombre completo.'
+  else if (data.nombre.trim().length > CONTACT_MAX.nombre)
+    errors.nombre = `Máximo ${CONTACT_MAX.nombre} caracteres.`
+
   if (!data.email.trim()) errors.email = 'Ingresa tu correo electrónico.'
   else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim()))
     errors.email = 'Ingresa un correo válido.'
+  else if (data.email.trim().length > CONTACT_MAX.email)
+    errors.email = `Máximo ${CONTACT_MAX.email} caracteres.`
+
   if (!data.telefono.trim()) errors.telefono = 'Ingresa un teléfono o WhatsApp.'
+  else if (data.telefono.trim().length > CONTACT_MAX.telefono)
+    errors.telefono = `Máximo ${CONTACT_MAX.telefono} caracteres.`
+
   if (!data.negocio.trim()) errors.negocio = 'Ingresa el nombre de tu negocio.'
+  else if (data.negocio.trim().length > CONTACT_MAX.negocio)
+    errors.negocio = `Máximo ${CONTACT_MAX.negocio} caracteres.`
+
   if (!data.tipoNegocio) errors.tipoNegocio = 'Selecciona el tipo de negocio.'
   if (!data.motivo) errors.motivo = 'Selecciona un motivo de contacto.'
+
+  if (data.sistemaActual.trim().length > CONTACT_MAX.sistemaActual)
+    errors.sistemaActual = `Máximo ${CONTACT_MAX.sistemaActual} caracteres.`
+
   if (data.mensaje.trim().length < 10)
     errors.mensaje = 'Cuéntanos un poco más (mínimo 10 caracteres).'
+  else if (data.mensaje.trim().length > CONTACT_MAX.mensaje)
+    errors.mensaje = `Máximo ${CONTACT_MAX.mensaje} caracteres.`
+
   if (!data.consentimiento) errors.consentimiento = 'Debes aceptar para poder continuar.'
 
   return errors

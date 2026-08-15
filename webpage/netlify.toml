@@ -1,10 +1,19 @@
 [build]
   command = "npm run build"
   publish = "dist"
-  functions = "netlify/functions"
+
+# Sitio 100% estático: los formularios envían directo a Web3Forms desde el
+# navegador (ver src/lib/web3forms.ts), sin funciones serverless propias.
+
+# Dominio canónico: https://sendwary.com (sin www). Redirect 301 permanente
+# desde www para evitar contenido duplicado. Debe ir antes del fallback SPA.
+[[redirects]]
+  from = "https://www.sendwary.com/*"
+  to = "https://sendwary.com/:splat"
+  status = 301
+  force = true
 
 # SPA fallback: todas las rutas del cliente (React Router) sirven index.html.
-# Se excluyen las funciones serverless para que /.netlify/functions/* funcione.
 [[redirects]]
   from = "/*"
   to = "/index.html"

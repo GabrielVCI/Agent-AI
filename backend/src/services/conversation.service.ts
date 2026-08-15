@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { invalidateDashboardCache } from "./dashboard.service.js";
 
 export async function findOrCreateCustomer(input: {
   tenantId: string;
@@ -52,6 +53,9 @@ export async function findOrCreateActiveConversation(input: {
     },
   });
 
+  // El dashboard cuenta conversaciones: invalidar su cache (fire-and-forget)
+  void invalidateDashboardCache(input.tenantId);
+
   return { conversation, created: true };
 }
 
@@ -90,6 +94,7 @@ export async function saveInboundMessage(input: {
     },
   });
 
+  void invalidateDashboardCache(input.tenantId);
   return message;
 }
 
@@ -114,6 +119,7 @@ export async function saveOutboundAgentMessage(input: {
     where: { id: input.conversationId },
     data: { lastOutboundAt: new Date() },
   });
+  void invalidateDashboardCache(input.tenantId);
   return message;
 }
 
@@ -136,6 +142,7 @@ export async function saveHumanMessage(input: {
     where: { id: input.conversationId },
     data: { lastOutboundAt: new Date() },
   });
+  void invalidateDashboardCache(input.tenantId);
   return message;
 }
 
@@ -191,6 +198,7 @@ export async function takeoverConversation(input: {
       },
     }),
   ]);
+  void invalidateDashboardCache(input.tenantId);
 }
 
 export async function releaseConversationToAgent(input: {
@@ -216,6 +224,7 @@ export async function releaseConversationToAgent(input: {
       data: { status: "RESOLVED", resolvedAt: new Date() },
     }),
   ]);
+  void invalidateDashboardCache(input.tenantId);
 }
 
 /**
@@ -289,8 +298,10 @@ export async function closeConversation(input: {
 
   if (!conversation) throw new AppError("Conversación no encontrada", 404);
 
-  return prisma.conversation.update({
+  const updated = await prisma.conversation.update({
     where: { id: input.conversationId },
     data: { status: "CLOSED" },
   });
+  void invalidateDashboardCache(input.tenantId);
+  return updated;
 }

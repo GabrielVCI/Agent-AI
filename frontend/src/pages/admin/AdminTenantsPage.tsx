@@ -8,6 +8,8 @@ import Button from '../../components/ui/Button'
 import Alert from '../../components/ui/Alert'
 import LoadingSpinner from '../../components/ui/LoadingSpinner'
 import NewClientModal from '../../components/admin/NewClientModal'
+import PaginationBar from '../../components/ui/PaginationBar'
+import { normalizePaginatedResponse } from '../../lib/pagination'
 
 type AdminTenantsApiResponse = {
   success?: boolean
@@ -190,18 +192,32 @@ export default function AdminTenantsPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [error, setError] = useState('')
 
+  // Paginación + search server-side (fase de listados): con >20 clientes el
+  // buscador antes solo veía la primera página cargada.
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(20)
+  const [total, setTotal] = useState(0)
+  const [pages, setPages] = useState(1)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
 
     try {
       const response = await api.get<AdminTenantsApiResponse | AdminTenant[]>(
-        '/api/admin/tenants'
+        '/api/admin/tenants',
+        {
+          search: search.trim() || undefined,
+          status: statusFilter || undefined,
+          page,
+          limit,
+        }
       )
 
-      const normalizedTenants = toArray(response).map(normalizeTenant)
-
-      setTenants(normalizedTenants)
+      const paged = normalizePaginatedResponse<unknown>(response)
+      setTenants(paged.items.map(normalizeTenant))
+      setTotal(paged.total)
+      setPages(paged.pages)
     } catch (err: unknown) {
       const e = err as { message?: string }
 
@@ -212,31 +228,20 @@ export default function AdminTenantsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [search, statusFilter, page, limit])
 
   useEffect(() => {
-    load()
-  }, [load])
+    // Debounce del search (300ms); los demás filtros cargan de inmediato
+    const t = window.setTimeout(load, search ? 300 : 0)
+    return () => window.clearTimeout(t)
+  }, [load, search])
 
-  const normalizedSearch = search.trim().toLowerCase()
-
+  // Microfiltro visual por nombre de plan (texto libre, sobre la página actual;
+  // el filtrado crítico —search/status— ya es server-side)
   const filtered = tenants.filter(t => {
-    if (statusFilter && t.status !== statusFilter) return false
     if (planFilter && !toStringSafe(t.plan).toLowerCase().includes(planFilter.toLowerCase()))
       return false
-    if (!normalizedSearch) return true
-
-    const name = toStringSafe(t.name).toLowerCase()
-    const email = toStringSafe(t.email).toLowerCase()
-    const plan = toStringSafe(t.plan).toLowerCase()
-    const status = toStringSafe(t.status).toLowerCase()
-
-    return (
-      name.includes(normalizedSearch) ||
-      email.includes(normalizedSearch) ||
-      plan.includes(normalizedSearch) ||
-      status.includes(normalizedSearch)
-    )
+    return true
   })
 
   const suspend = async (id: string) => {
@@ -326,13 +331,19 @@ export default function AdminTenantsPage() {
             type="text"
             placeholder="Buscar por nombre, correo, plan o estado..."
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => {
+              setSearch(e.target.value)
+              setPage(1)
+            }}
             className="w-full pl-9 pr-4 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
           />
         </div>
         <select
           value={statusFilter}
-          onChange={e => setStatusFilter(e.target.value)}
+          onChange={e => {
+            setStatusFilter(e.target.value)
+            setPage(1)
+          }}
           className="px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 focus:outline-none focus:ring-2 focus:ring-primary-500"
         >
           <option value="">Todos los estados</option>
@@ -501,6 +512,22 @@ export default function AdminTenantsPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {filtered.length > 0 && (
+          <div className="px-4 pb-3">
+            <PaginationBar
+              total={total}
+              page={page}
+              pages={pages}
+              limit={limit}
+              onPageChange={setPage}
+              onLimitChange={l => {
+                setLimit(l)
+                setPage(1)
+              }}
+              noun="clientes"
+            />
           </div>
         )}
       </div>

@@ -8,6 +8,7 @@ import {
   CatalogItemInput,
   CatalogItemType,
 } from '../services/catalogApi'
+import PaginationBar from '../components/ui/PaginationBar'
 import { Card } from '../components/ui/Card'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
@@ -403,11 +404,27 @@ export default function CatalogPage() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  // Filtros de ítems
+  // Filtros de ítems — TODOS server-side (fase de listados): el backend
+  // filtra y pagina; el frontend nunca filtra la página cargada.
   const [search, setSearch] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [filterType, setFilterType] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+
+  // Paginación server-side. Cambiar cualquier filtro resetea page=1.
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(20)
+  const [total, setTotal] = useState(0)
+  const [pages, setPages] = useState(1)
+
+  const withPageReset = <T,>(setter: (v: T) => void) => (v: T) => {
+    setter(v)
+    setPage(1)
+  }
+  const setSearchF = withPageReset(setSearch)
+  const setFilterCategoryF = withPageReset(setFilterCategory)
+  const setFilterTypeF = withPageReset(setFilterType)
+  const setFilterStatusF = withPageReset(setFilterStatus)
 
   // Modales
   const [itemModalOpen, setItemModalOpen] = useState(false)
@@ -422,11 +439,20 @@ export default function CatalogPage() {
   const load = useCallback(async () => {
     setError('')
     try {
-      const [itemsData, categoriesData] = await Promise.all([
-        catalogApi.listItems(),
+      const [itemsResult, categoriesData] = await Promise.all([
+        catalogApi.listItems({
+          search: search.trim() || undefined,
+          categoryId: filterCategory || undefined,
+          type: (filterType || undefined) as CatalogItem['type'] | undefined,
+          status: (filterStatus || undefined) as 'active' | 'inactive' | undefined,
+          page,
+          limit,
+        }),
         catalogApi.listCategories(),
       ])
-      setItems(itemsData ?? [])
+      setItems(itemsResult.items)
+      setTotal(itemsResult.total)
+      setPages(itemsResult.pages)
       setCategories(categoriesData ?? [])
     } catch (err: unknown) {
       const e = err as { message?: string }
@@ -434,26 +460,16 @@ export default function CatalogPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [search, filterCategory, filterType, filterStatus, page, limit])
 
   useEffect(() => {
-    load()
-  }, [load])
+    // Debounce del search (300ms); el resto de filtros cargan de inmediato
+    const t = window.setTimeout(load, search ? 300 : 0)
+    return () => window.clearTimeout(t)
+  }, [load, search])
 
-  const filteredItems = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    return items.filter(item => {
-      if (q) {
-        const haystack = `${item.name} ${item.sku ?? ''} ${item.description ?? ''}`.toLowerCase()
-        if (!haystack.includes(q)) return false
-      }
-      if (filterCategory && item.categoryId !== filterCategory) return false
-      if (filterType && item.type !== filterType) return false
-      if (filterStatus === 'active' && !item.isActive) return false
-      if (filterStatus === 'inactive' && item.isActive) return false
-      return true
-    })
-  }, [items, search, filterCategory, filterType, filterStatus])
+  // El backend ya filtró y paginó: la lista renderiza tal cual
+  const filteredItems = items
 
   const flash = (msg: string) => {
     setNotice(msg)
@@ -574,14 +590,14 @@ export default function CatalogPage() {
               <input
                 type="text"
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => setSearchF(e.target.value)}
                 placeholder="Buscar por nombre, SKU o descripción…"
                 className={`${inputClass} pl-9`}
               />
             </div>
             <select
               value={filterCategory}
-              onChange={e => setFilterCategory(e.target.value)}
+              onChange={e => setFilterCategoryF(e.target.value)}
               className={inputClass}
               title="Categoría"
             >
@@ -594,7 +610,7 @@ export default function CatalogPage() {
             </select>
             <select
               value={filterType}
-              onChange={e => setFilterType(e.target.value)}
+              onChange={e => setFilterTypeF(e.target.value)}
               className={inputClass}
               title="Tipo"
             >
@@ -604,7 +620,7 @@ export default function CatalogPage() {
             </select>
             <select
               value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
+              onChange={e => setFilterStatusF(e.target.value)}
               className={inputClass}
               title="Estado"
             >
@@ -618,14 +634,18 @@ export default function CatalogPage() {
             {filteredItems.length === 0 ? (
               <EmptyState
                 icon={<Package className="h-10 w-10" />}
-                title={items.length === 0 ? 'Tu catálogo está vacío' : 'Sin resultados'}
+                title={
+                  search || filterCategory || filterType || filterStatus
+                    ? 'No encontramos resultados con estos filtros'
+                    : 'Tu catálogo está vacío'
+                }
                 description={
-                  items.length === 0
-                    ? 'Agrega productos o servicios para que tu agente IA pueda responder con precios y disponibilidad reales.'
-                    : 'Ningún ítem coincide con la búsqueda o los filtros.'
+                  search || filterCategory || filterType || filterStatus
+                    ? 'Prueba con otros términos o limpia los filtros.'
+                    : 'Agrega productos o servicios para que tu agente IA pueda responder con precios y disponibilidad reales.'
                 }
                 action={
-                  canManage && items.length === 0 ? (
+                  canManage && !search && !filterCategory && !filterType && !filterStatus ? (
                     <Button
                       icon={<Plus className="h-4 w-4" />}
                       onClick={() => {
@@ -735,6 +755,22 @@ export default function CatalogPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {filteredItems.length > 0 && (
+              <div className="px-4 pb-3">
+                <PaginationBar
+                  total={total}
+                  page={page}
+                  pages={pages}
+                  limit={limit}
+                  onPageChange={setPage}
+                  onLimitChange={l => {
+                    setLimit(l)
+                    setPage(1)
+                  }}
+                  noun="ítems"
+                />
               </div>
             )}
           </Card>

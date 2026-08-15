@@ -1,7 +1,38 @@
 import { prisma } from "../config/prisma.js";
 import { getRedisClient } from "../config/redis.js";
+import { logger } from "../config/logger.js";
 
 const CACHE_TTL = 60; // 1 minute cache
+
+// TODAS las claves de cache del dashboard (por tenant). Mantener esta lista en
+// sync con los withCache() de este archivo: la invalidación borra exactamente
+// estas claves (nunca KEYS/SCAN — O(1) y seguro en producción).
+const DASH_CACHE_KEYS = [
+  "summary",
+  "byphone",
+  "agents",
+  "handoffs",
+  "quotes",
+  "activity",
+  "customers",
+  "usage",
+  "audio",
+] as const;
+
+/**
+ * Invalida el cache del dashboard de un tenant. Llamar después de cualquier
+ * mutación que afecte métricas (mensajes, conversaciones, citas, catálogo,
+ * agentes, uso). Best-effort: si Redis no está, el TTL de 60s sigue acotando
+ * la ventana de datos viejos. Los DEL son idempotentes y baratos.
+ */
+export async function invalidateDashboardCache(tenantId: string): Promise<void> {
+  try {
+    const redis = getRedisClient();
+    await redis.del(...DASH_CACHE_KEYS.map((k) => `dash:${k}:${tenantId}`));
+  } catch (err) {
+    logger.debug(`[DASHBOARD CACHE] invalidación omitida (Redis no disponible): ${String(err)}`);
+  }
+}
 
 async function withCache<T>(
   key: string,
@@ -54,6 +85,11 @@ export async function getDashboardSummary(tenantId: string) {
       outboundMessages,
       subscription,
       unansweredConversations,
+      messagesToday,
+      upcomingAppointments,
+      pendingAppointments,
+      activeProducts,
+      activeAgents,
     ] = await Promise.all([
       prisma.conversation.count({ where: { tenantId, createdAt: { gte: monthStart } } }),
       prisma.conversation.count({ where: { tenantId, status: "BOT_ACTIVE", createdAt: { gte: monthStart } } }),
@@ -74,6 +110,21 @@ export async function getDashboardSummary(tenantId: string) {
           lastMessageAt: { lt: new Date(Date.now() - 60 * 60 * 1000) }, // > 1h without response
         },
       }),
+      // Hoy = día calendario del servidor (los tenants RD comparten zona; ver
+      // nota de timezone en docs/DATA_CONSISTENCY_AUDIT.md)
+      prisma.message.count({
+        where: { tenantId, createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+      }),
+      prisma.appointment.count({
+        where: {
+          tenantId,
+          status: { in: ["PENDING", "CONFIRMED", "RESCHEDULED"] },
+          scheduledAt: { gt: new Date() },
+        },
+      }),
+      prisma.appointment.count({ where: { tenantId, status: "PENDING" } }),
+      prisma.product.count({ where: { tenantId, isActive: true } }),
+      prisma.agent.count({ where: { tenantId, status: "ACTIVE" } }),
     ]);
 
     const humanInterventionRate =
@@ -97,6 +148,11 @@ export async function getDashboardSummary(tenantId: string) {
       totalMessages,
       inboundMessages,
       outboundMessages,
+      messagesToday,
+      upcomingAppointments,
+      pendingAppointments,
+      activeProducts,
+      activeAgents,
       humanInterventionRate: `${humanInterventionRate}%`,
       aiResolvedRate: `${aiResolvedRate}%`,
       planUsage: subscription
@@ -437,6 +493,31 @@ export async function getUsageMetrics(tenantId: string) {
         },
         messages: { used: messages },
       },
+    };
+  });
+}
+
+/**
+ * Métricas de audio REALES desde UsageMetric (metricType AUDIO_TRANSCRIPTION,
+ * registrado por audio-transcription.service). Reemplaza el stub que devolvía
+ * ceros hardcoded aunque ya hubiera transcripciones.
+ */
+export async function getAudioMetrics(tenantId: string) {
+  return withCache(`dash:audio:${tenantId}`, async () => {
+    const monthStart = startOfMonth();
+    const base = { tenantId, metricType: "AUDIO_TRANSCRIPTION" as const, createdAt: { gte: monthStart } };
+
+    const [audioReceived, audioTranscribed] = await Promise.all([
+      prisma.usageMetric.count({ where: base }),
+      prisma.usageMetric.count({
+        where: { ...base, metadata: { path: ["success"], equals: true } },
+      }),
+    ]);
+
+    return {
+      audioReceived,
+      audioTranscribed,
+      audioFailed: audioReceived - audioTranscribed,
     };
   });
 }

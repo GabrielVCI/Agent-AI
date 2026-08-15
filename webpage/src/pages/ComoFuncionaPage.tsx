@@ -33,6 +33,7 @@ import { Navbar } from '@/components/landing/Navbar'
 import { Footer } from '@/components/layout/Footer'
 import { SectionBadge, IconBadge, CtaButtons } from '@/components/ui/page-sections'
 import { BrandIcon, type BrandName } from '@/components/ui/brand-icon'
+import { SEOHead } from '@/components/seo/SEOHead'
 
 /* ========================================================================== */
 /*  Datos                                                                      */
@@ -536,6 +537,11 @@ function PageCTA() {
 export default function ComoFuncionaPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Cómo funciona Sendwary | Agentes IA para atención y seguimiento"
+        description="Descubre cómo Sendwary organiza conversaciones, responde con agentes IA, captura solicitudes y permite intervención humana cuando tu negocio lo necesita."
+        path="/como-funciona"
+      />
       <Navbar />
       <main>
         <PageHero />

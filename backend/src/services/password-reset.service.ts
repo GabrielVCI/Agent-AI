@@ -3,6 +3,7 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { generateToken, hashToken } from "../lib/crypto.js";
 import { hashPassword, logoutAllSessions } from "./auth.service.js";
+import { sendPasswordResetEmail } from "./email.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 
 /**
@@ -15,8 +16,9 @@ import { AppError } from "../middlewares/error.middleware.js";
  * - Un solo token activo por usuario (los anteriores se invalidan), expira en
  *   60 minutos y es de un solo uso (usedAt).
  * - Al resetear se revocan TODAS las sesiones del usuario.
- * - Sin proveedor de correo configurado, el link se registra en logs SOLO en
- *   desarrollo; en producción se registra el evento sin el token.
+ * - El correo sale por Resend (email.service). Sin proveedor configurado, en
+ *   desarrollo se loguea un preview con el link; en producción se registra el
+ *   fallo SIN el token y el usuario recibe siempre la misma respuesta genérica.
  */
 
 const RESET_TOKEN_TTL_MINUTES = 60;
@@ -56,13 +58,18 @@ export async function requestPasswordReset(rawEmail: string): Promise<void> {
 
   const resetUrl = buildResetUrl(token);
 
-  // Punto de integración del proveedor de correo (Resend/SMTP/SES). Mientras
-  // no exista, el flujo es utilizable en desarrollo vía logs.
-  if (env.NODE_ENV !== "production") {
-    logger.info(`[PASSWORD RESET] link de recuperación (solo dev): ${resetUrl}`);
-  } else {
-    logger.warn(
-      `[PASSWORD RESET] token generado para userId=${user.id} pero no hay proveedor de correo configurado: el usuario no recibirá el link`
+  // El envío no lanza: el controller responde genérico pase lo que pase (no
+  // revelar si el correo existe ni si el proveedor falló).
+  const result = await sendPasswordResetEmail({
+    to: user.email,
+    firstName: user.name,
+    resetUrl,
+    expiresInMinutes: RESET_TOKEN_TTL_MINUTES,
+  });
+
+  if (!result.sent && env.NODE_ENV === "production") {
+    logger.error(
+      `[PASSWORD RESET] token generado para userId=${user.id} pero el correo NO se envió (${result.reason}): el usuario no recibirá el link`
     );
   }
 }

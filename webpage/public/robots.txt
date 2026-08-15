@@ -1,5 +1,4 @@
 User-agent: *
 Allow: /
 
-# TODO: reemplazar por el dominio real en producción.
-Sitemap: https://tudominio.com/sitemap.xml
+Sitemap: https://sendwary.com/sitemap.xml

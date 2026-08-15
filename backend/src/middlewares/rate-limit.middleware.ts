@@ -104,9 +104,11 @@ function onLimitReached(name: string) {
     );
     res.status(429).json({
       success: false,
-      error: "Demasiadas solicitudes. Intenta nuevamente en unos minutos.",
       message: "Demasiadas solicitudes. Intenta nuevamente en unos minutos.",
-      code: "RATE_LIMIT_EXCEEDED",
+      error: {
+        code: "RATE_LIMIT_EXCEEDED",
+        message: "Demasiadas solicitudes. Intenta nuevamente en unos minutos.",
+      },
     });
   };
 }

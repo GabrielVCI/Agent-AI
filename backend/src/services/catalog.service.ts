@@ -121,7 +121,13 @@ export interface ListItemsFilters {
   categoryId?: string;
   type?: "PRODUCT" | "SERVICE";
   status?: "active" | "inactive";
+  page?: number;
+  limit?: number;
+  sortBy?: "name" | "price" | "createdAt";
+  sortOrder?: "asc" | "desc";
 }
+
+const ITEM_SORT_FIELDS = ["name", "price", "createdAt"] as const;
 
 export async function listItems(tenantId: string, filters: ListItemsFilters) {
   const where: Prisma.ProductWhereInput = { tenantId };
@@ -137,13 +143,31 @@ export async function listItems(tenantId: string, filters: ListItemsFilters) {
   if (filters.type) where.itemType = filters.type;
   if (filters.status) where.isActive = filters.status === "active";
 
-  const items = await prisma.product.findMany({
-    where,
-    include: itemInclude,
-    orderBy: { name: "asc" },
-  });
+  const page = Math.max(1, filters.page ?? 1);
+  const limit = Math.min(Math.max(1, filters.limit ?? 20), 100);
+  const sortBy = ITEM_SORT_FIELDS.includes(filters.sortBy as never)
+    ? (filters.sortBy as (typeof ITEM_SORT_FIELDS)[number])
+    : "name";
+  const sortOrder = filters.sortOrder === "desc" ? "desc" : "asc";
 
-  return items.map(serializeItem);
+  const [rows, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      include: itemInclude,
+      orderBy: { [sortBy]: sortOrder },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  return {
+    items: rows.map(serializeItem),
+    total,
+    page,
+    limit,
+    pages: Math.max(1, Math.ceil(total / limit)),
+  };
 }
 
 export interface ItemInput {

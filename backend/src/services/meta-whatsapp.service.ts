@@ -3,25 +3,42 @@ import fs from "fs";
 import FormData from "form-data";
 import { env } from "../config/env.js";
 
+/**
+ * Credenciales de envío. Si vienen (integración WhatsApp del tenant) se usan
+ * esas; si no, cae al token global del .env (flujo legacy/demo). El webhook
+ * multi-tenant SIEMPRE las resuelve vía resolveSendCredentials() y solo llega
+ * aquí sin credenciales cuando el fallback global está permitido.
+ */
+export interface SendCredentials {
+  accessToken: string;
+  graphApiVersion: string;
+}
+
 function resolvePhoneNumberId(overrideId?: string): string {
   const id = overrideId || env.META_PHONE_NUMBER_ID;
   if (!id) throw new Error("META_PHONE_NUMBER_ID no está configurado.");
   return id;
 }
 
-function getToken(): string {
+function getToken(credentials?: SendCredentials): string {
+  if (credentials?.accessToken) return credentials.accessToken;
   if (!env.META_WHATSAPP_TOKEN) throw new Error("META_WHATSAPP_TOKEN no está configurado.");
   return env.META_WHATSAPP_TOKEN;
+}
+
+function getGraphVersion(credentials?: SendCredentials): string {
+  return credentials?.graphApiVersion || env.META_GRAPH_API_VERSION;
 }
 
 export async function sendWhatsappTextMessage(input: {
   to: string;
   text: string;
   phoneNumberId?: string;
+  credentials?: SendCredentials;
 }) {
   const phoneId = resolvePhoneNumberId(input.phoneNumberId);
-  const token = getToken();
-  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/messages`;
+  const token = getToken(input.credentials);
+  const url = `https://graph.facebook.com/${getGraphVersion(input.credentials)}/${phoneId}/messages`;
 
   const response = await axios.post(
     url,
@@ -47,15 +64,18 @@ export async function sendWhatsappTextMessage(input: {
  * (expira en ~5 min, requiere el Bearer token) y luego se descarga el binario.
  * La URL temporal NUNCA se persiste ni se expone al frontend.
  */
-export async function downloadWhatsappMedia(mediaId: string): Promise<{
+export async function downloadWhatsappMedia(
+  mediaId: string,
+  credentials?: SendCredentials
+): Promise<{
   buffer: Buffer;
   mimeType: string;
   fileSize: number | null;
 }> {
-  const token = getToken();
+  const token = getToken(credentials);
 
   const metaRes = await axios.get(
-    `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${mediaId}`,
+    `https://graph.facebook.com/${getGraphVersion(credentials)}/${mediaId}`,
     { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
   );
   const { url, mime_type: mimeType, file_size: fileSize } = metaRes.data as {
@@ -82,15 +102,16 @@ export async function downloadWhatsappMedia(mediaId: string): Promise<{
 export async function uploadWhatsappDocumentMedia(input: {
   filePath: string;
   phoneNumberId?: string;
+  credentials?: SendCredentials;
 }) {
   const phoneId = resolvePhoneNumberId(input.phoneNumberId);
-  const token = getToken();
+  const token = getToken(input.credentials);
 
   if (!fs.existsSync(input.filePath)) {
     throw new Error(`No se encontró el archivo PDF: ${input.filePath}`);
   }
 
-  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/media`;
+  const url = `https://graph.facebook.com/${getGraphVersion(input.credentials)}/${phoneId}/media`;
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
   form.append("type", "application/pdf");
@@ -110,10 +131,11 @@ export async function sendWhatsappDocumentMessage(input: {
   filename: string;
   caption?: string;
   phoneNumberId?: string;
+  credentials?: SendCredentials;
 }) {
   const phoneId = resolvePhoneNumberId(input.phoneNumberId);
-  const token = getToken();
-  const url = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${phoneId}/messages`;
+  const token = getToken(input.credentials);
+  const url = `https://graph.facebook.com/${getGraphVersion(input.credentials)}/${phoneId}/messages`;
 
   const response = await axios.post(
     url,

@@ -1,8 +1,14 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { hashPassword } from "./auth.service.js";
 import { getCurrentPeriod } from "./billing.service.js";
+import { issueVerificationEmail } from "./email-verification.service.js";
+import {
+  sendImplementationNextStepEmail,
+  sendImplementationPaymentReminderEmail,
+} from "./email.service.js";
 import { logger } from "../config/logger.js";
 
 const customFieldsSchema = {
@@ -83,16 +89,31 @@ export const assignPlanSchema = z.object({
   customMonthlyTokenLimit: z.coerce.number().int().min(1000).nullish(),
 });
 
-export async function listTenants(page = 1, limit = 20) {
+export async function listTenants(page = 1, limit = 20, search?: string, status?: string) {
   const skip = (page - 1) * limit;
+  // Search/status server-side: el panel admin ya no filtra solo la página cargada
+  const where: Prisma.TenantWhereInput = {
+    ...(status ? { status: status as Prisma.TenantWhereInput["status"] } : {}),
+    ...(search
+      ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" as const } },
+            { legalName: { contains: search, mode: "insensitive" as const } },
+            { email: { contains: search, mode: "insensitive" as const } },
+            { rnc: { contains: search, mode: "insensitive" as const } },
+          ],
+        }
+      : {}),
+  };
   const [tenants, total] = await Promise.all([
     prisma.tenant.findMany({
+      where,
       include: { subscription: { include: { plan: true } }, _count: { select: { users: true, agents: true } } },
       orderBy: { createdAt: "desc" },
       skip,
       take: limit,
     }),
-    prisma.tenant.count(),
+    prisma.tenant.count({ where }),
   ]);
 
   // Uso del mes calendario actual (una sola consulta para toda la página)
@@ -261,6 +282,8 @@ export async function createTenantWithOwner(
       },
     });
 
+    // Clientes creados manualmente por SUPER_ADMIN: nacen verificados (el
+    // admin ya validó el contacto) para no caer en la pantalla de verificación.
     const owner = existingUser
       ? await tx.user.update({
           where: { id: existingUser.id },
@@ -268,6 +291,7 @@ export async function createTenantWithOwner(
             tenantId: tenant.id,
             role: "OWNER",
             ...(data.ownerPassword || tempPassword ? { passwordHash } : {}),
+            ...(existingUser.emailVerifiedAt ? {} : { emailVerifiedAt: now }),
           },
         })
       : await tx.user.create({
@@ -279,6 +303,7 @@ export async function createTenantWithOwner(
             passwordHash,
             role: "OWNER",
             status: "ACTIVE",
+            emailVerifiedAt: now,
           },
         });
 
@@ -490,8 +515,193 @@ export async function createUserForTenant(input: {
       passwordHash,
       role: input.role,
       status: "ACTIVE",
+      // Usuarios creados por SUPER_ADMIN nacen verificados
+      emailVerifiedAt: new Date(),
     },
   });
+}
+
+// ─── Implementación y activación comercial (solo SUPER_ADMIN) ────────────────
+
+export const updateImplementationSchema = z.object({
+  lifecycleStatus: z
+    .enum([
+      "REGISTERED",
+      "EMAIL_PENDING",
+      "EMAIL_VERIFIED",
+      "IMPLEMENTATION_PENDING",
+      "IMPLEMENTATION_IN_PROGRESS",
+      "IMPLEMENTATION_COMPLETED",
+      "ACTIVE",
+      "SUSPENDED",
+      "CANCELLED",
+    ])
+    .optional(),
+  // Conveniencia: true marca el pago con fecha actual, false lo limpia
+  implementationFeePaid: z.boolean().optional(),
+  implementationFeePaidAt: z.coerce.date().nullish(),
+  implementationStartedAt: z.coerce.date().nullish(),
+  implementationExpectedEndAt: z.coerce.date().nullish(),
+  finalActivationDate: z.coerce.date().nullish(),
+  paywallBypassUntil: z.coerce.date().nullish(),
+  paywallBypassReason: z.string().max(300).nullish(),
+  internalImplementationNotes: z.string().max(4000).nullish(),
+});
+
+function addOneMonth(date: Date): Date {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + 1);
+  return result;
+}
+
+/**
+ * Control del flujo comercial de un tenant. Derivaciones automáticas:
+ * - finalActivationDate → firstMonthEndsAt = +1 mes y lifecycle ACTIVE
+ *   (salvo lifecycleStatus explícito). Limpiarla limpia firstMonthEndsAt.
+ * - implementationStartedAt (si el lifecycle sigue en etapa previa) →
+ *   IMPLEMENTATION_IN_PROGRESS.
+ * Todos los cambios quedan auditados en SupportAuditLog (actorType ADMIN).
+ */
+export async function updateTenantImplementation(
+  tenantId: string,
+  data: z.infer<typeof updateImplementationSchema>,
+  adminId?: string
+) {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+  if (!tenant) throw new AppError("Empresa no encontrada", 404);
+
+  const now = new Date();
+  const patch: Prisma.TenantUpdateInput = {};
+
+  if (data.implementationFeePaid !== undefined) {
+    patch.implementationFeePaidAt = data.implementationFeePaid ? now : null;
+  }
+  if (data.implementationFeePaidAt !== undefined) {
+    patch.implementationFeePaidAt = data.implementationFeePaidAt;
+  }
+  if (data.implementationStartedAt !== undefined) {
+    patch.implementationStartedAt = data.implementationStartedAt;
+  }
+  if (data.implementationExpectedEndAt !== undefined) {
+    patch.implementationExpectedEndAt = data.implementationExpectedEndAt;
+  }
+  if (data.paywallBypassUntil !== undefined) {
+    patch.paywallBypassUntil = data.paywallBypassUntil;
+    if (data.paywallBypassUntil === null) patch.paywallBypassReason = null;
+  }
+  if (data.paywallBypassReason !== undefined) {
+    patch.paywallBypassReason = data.paywallBypassReason;
+  }
+  if (data.internalImplementationNotes !== undefined) {
+    patch.internalImplementationNotes = data.internalImplementationNotes;
+  }
+
+  // Activación final: recalcula SIEMPRE firstMonthEndsAt (regla del flujo)
+  if (data.finalActivationDate !== undefined) {
+    patch.finalActivationDate = data.finalActivationDate;
+    patch.firstMonthEndsAt = data.finalActivationDate
+      ? addOneMonth(data.finalActivationDate)
+      : null;
+  }
+
+  // Lifecycle: explícito manda; si no, derivar transiciones obvias
+  if (data.lifecycleStatus) {
+    patch.lifecycleStatus = data.lifecycleStatus;
+  } else if (data.finalActivationDate) {
+    patch.lifecycleStatus = "ACTIVE";
+  } else if (
+    data.implementationStartedAt &&
+    ["REGISTERED", "EMAIL_PENDING", "EMAIL_VERIFIED", "IMPLEMENTATION_PENDING"].includes(
+      tenant.lifecycleStatus
+    )
+  ) {
+    patch.lifecycleStatus = "IMPLEMENTATION_IN_PROGRESS";
+  }
+
+  const updated = await prisma.tenant.update({ where: { id: tenantId }, data: patch });
+
+  // Auditoría (no bloqueante): quién cambió qué
+  await prisma.supportAuditLog
+    .create({
+      data: {
+        actorType: "ADMIN",
+        actorId: adminId ?? null,
+        action: "tenant.implementation.update",
+        detailsJson: {
+          tenantId,
+          changes: JSON.parse(JSON.stringify(data)),
+        },
+      },
+    })
+    .catch((err) => logger.warn(`[ADMIN] auditoría de implementación falló: ${String(err)}`));
+
+  logger.info(
+    `[ADMIN] implementación actualizada tenant=${tenantId} lifecycle=${updated.lifecycleStatus} activación=${updated.finalActivationDate?.toISOString() ?? "—"} primerMes=${updated.firstMonthEndsAt?.toISOString() ?? "—"} por admin=${adminId ?? "?"}`
+  );
+  return updated;
+}
+
+/** OWNER del tenant (para reenviar correos comerciales desde el admin). */
+async function getTenantOwner(tenantId: string) {
+  const owner = await prisma.user.findFirst({
+    where: { tenantId, role: "OWNER", status: { not: "DISABLED" } },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!owner) throw new AppError("La empresa no tiene OWNER activo", 404);
+  return owner;
+}
+
+export async function resendTenantVerificationEmail(tenantId: string) {
+  const owner = await getTenantOwner(tenantId);
+  if (owner.emailVerifiedAt) {
+    return { sent: false, reason: "El correo del owner ya está verificado" };
+  }
+  await issueVerificationEmail(owner);
+  return { sent: true, email: owner.email };
+}
+
+export async function resendTenantImplementationEmail(tenantId: string) {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+  if (!tenant) throw new AppError("Empresa no encontrada", 404);
+  const owner = await getTenantOwner(tenantId);
+  const result = await sendImplementationNextStepEmail({
+    to: owner.email,
+    firstName: owner.name,
+    businessName: tenant.name,
+  });
+  return { sent: result.sent, email: owner.email };
+}
+
+/**
+ * Recordatorio del pago de implementación (lo dispara el SUPER_ADMIN desde el
+ * panel). Usa el setup fee negociado del tenant si existe, o el del plan.
+ */
+export async function sendTenantImplementationReminder(tenantId: string, adminId?: string) {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    include: { subscription: { include: { plan: true } } },
+  });
+  if (!tenant) throw new AppError("Empresa no encontrada", 404);
+  if (tenant.implementationFeePaidAt) {
+    return { sent: false, reason: "El pago de implementación ya está registrado" };
+  }
+
+  const owner = await getTenantOwner(tenantId);
+  const sub = tenant.subscription;
+  const fee = sub?.customSetupFee ?? sub?.plan?.setupFee ?? null;
+  const currency = sub?.plan?.currency ?? "USD";
+
+  const result = await sendImplementationPaymentReminderEmail({
+    to: owner.email,
+    firstName: owner.name,
+    businessName: tenant.name,
+    setupFeeText: fee != null ? `${currency} ${Number(fee.toString()).toLocaleString("es-DO")}` : null,
+  });
+
+  logger.info(
+    `[ADMIN] recordatorio de implementación ${result.sent ? "enviado" : "no enviado"} tenant=${tenantId} por admin=${adminId ?? "?"}`
+  );
+  return { sent: result.sent, email: owner.email };
 }
 
 export async function listCancellationRequests(status?: string) {

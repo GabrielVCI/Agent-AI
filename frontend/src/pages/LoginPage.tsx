@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import api from '../lib/api'
+import { getUserFriendlyErrorMessage } from '../lib/errors'
 import Button from '../components/ui/Button'
 import Alert from '../components/ui/Alert'
 import AuthLayout from '../components/auth/AuthLayout'
@@ -36,8 +37,7 @@ export default function LoginPage() {
       await refreshUser()
       navigate('/', { replace: true })
     } catch (err: unknown) {
-      const e = err as { message?: string }
-      setError(e?.message || 'Credenciales inválidas')
+      setError(getUserFriendlyErrorMessage(err))
     } finally {
       setLoading(false)
     }

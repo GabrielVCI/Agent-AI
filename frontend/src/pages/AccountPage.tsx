@@ -1,5 +1,6 @@
-import { useEffect, useState, FormEvent } from 'react'
+import { useCallback, useEffect, useState, FormEvent } from 'react'
 import { CreditCard, Download, CheckCircle2, XCircle, Clock, LifeBuoy } from 'lucide-react'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import { Subscription, Invoice } from '../types'
 import api from '../lib/api'
 import { Card, CardHeader, StatCard } from '../components/ui/Card'
@@ -11,6 +12,7 @@ import LoadingSpinner from '../components/ui/LoadingSpinner'
 import UsageCard from '../components/billing/UsageCard'
 import VoiceUsageCard from '../components/billing/VoiceUsageCard'
 import PlanCards from '../components/billing/PlanCards'
+import BillingDetailsCard from '../components/billing/BillingDetailsCard'
 
 type CancelReason =
   | 'too_expensive'
@@ -426,46 +428,40 @@ export default function AccountPage() {
   const [cancelSent, setCancelSent] = useState(false)
   const [cancelLoading, setCancelLoading] = useState(false)
 
-  useEffect(() => {
-    let cancelled = false
+  // silent=true: refresco de fondo sin spinner y conservando datos si falla
+  const loadAccount = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
 
-    async function loadAccount() {
-      setLoading(true)
+    const [subscriptionResult, invoicesResult] = await Promise.allSettled([
+      api.get<AccountPlanApiResponse | Subscription>('/api/account/plan'),
+      api.get<InvoicesApiResponse | Invoice[]>('/api/account/invoices'),
+    ])
+
+    if (subscriptionResult.status === 'fulfilled') {
+      setSub(normalizeSubscription(subscriptionResult.value))
       setPageError('')
-
-      const [subscriptionResult, invoicesResult] = await Promise.allSettled([
-        api.get<AccountPlanApiResponse | Subscription>('/api/account/plan'),
-        api.get<InvoicesApiResponse | Invoice[]>('/api/account/invoices'),
-      ])
-
-      if (cancelled) return
-
-      if (subscriptionResult.status === 'fulfilled') {
-        const normalizedSub = normalizeSubscription(subscriptionResult.value)
-        setSub(normalizedSub)
-      } else {
-        console.error('Error cargando plan de cuenta:', subscriptionResult.reason)
-        setSub(null)
-        setPageError('No se pudo cargar la información del plan.')
-      }
-
-      if (invoicesResult.status === 'fulfilled') {
-        const normalizedInvoices = toArray(invoicesResult.value).map(normalizeInvoice)
-        setInvoices(normalizedInvoices)
-      } else {
-        console.error('Error cargando facturas:', invoicesResult.reason)
-        setInvoices([])
-      }
-
-      setLoading(false)
+    } else if (!silent) {
+      console.error('Error cargando plan de cuenta:', subscriptionResult.reason)
+      setSub(null)
+      setPageError('No se pudo cargar la información del plan.')
     }
 
-    loadAccount()
-
-    return () => {
-      cancelled = true
+    if (invoicesResult.status === 'fulfilled') {
+      setInvoices(toArray(invoicesResult.value).map(normalizeInvoice))
+    } else if (!silent) {
+      console.error('Error cargando facturas:', invoicesResult.reason)
+      setInvoices([])
     }
+
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    loadAccount()
+  }, [loadAccount])
+
+  // Uso del plan casi en tiempo real (Parte A: billing cada 60s)
+  useAutoRefresh(() => loadAccount(true), 60_000)
 
   const submitCancellation = async () => {
     setCancelLoading(true)
@@ -521,6 +517,9 @@ export default function AccountPage() {
         {/* Minutos de llamadas IA (Enterprise) */}
         <VoiceUsageCard />
       </div>
+
+      {/* Estado de la suscripción + IDs de LemonSqueezy (Parte I paywall) */}
+      <BillingDetailsCard />
 
       {/* Planes Sendwary con checkout preparado (overlay LemonSqueezy) */}
       <PlanCards currentPlanCode={currentPlanCode} />

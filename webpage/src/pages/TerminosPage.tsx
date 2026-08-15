@@ -3,6 +3,7 @@ import { AlertTriangle, ArrowRight } from 'lucide-react'
 import { Navbar } from '@/components/landing/Navbar'
 import { Footer } from '@/components/layout/Footer'
 import { SectionBadge } from '@/components/ui/page-sections'
+import { SEOHead } from '@/components/seo/SEOHead'
 
 /* -------------------------------------------------------------------------- */
 /*  Constantes editables                                                       */
@@ -12,7 +13,7 @@ import { SectionBadge } from '@/components/ui/page-sections'
 const COMPANY_LEGAL_NAME = '[Nombre legal de la empresa]'
 const PLATFORM_NAME = 'Sendwary'
 const COMPANY_COUNTRY = 'República Dominicana'
-const SUPPORT_EMAIL = 'contacto@tudominio.com'
+const SUPPORT_EMAIL = 'info@sendwary.com'
 const LAST_UPDATED = '2026-07-02'
 
 /* -------------------------------------------------------------------------- */
@@ -435,6 +436,11 @@ function renderBlock(block: Block, key: number) {
 export default function TerminosPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Términos y condiciones | Sendwary"
+        description="Consulta los términos y condiciones de uso de Sendwary, plataforma SaaS de agentes IA para atención, conversaciones, cotizaciones, citas e integraciones."
+        path="/terminos"
+      />
       <Navbar />
       <main>
         {/* Hero legal */}

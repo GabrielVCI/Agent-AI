@@ -11,8 +11,10 @@ import {
   forgotPasswordController,
   validateResetTokenController,
   resetPasswordController,
+  verifyEmailController,
+  resendVerificationController,
 } from "../controllers/auth.controller.js";
-import { requireAuth } from "../middlewares/auth.middleware.js";
+import { requireAuth, optionalAuth } from "../middlewares/auth.middleware.js";
 import {
   authRateLimit,
   registerRateLimit,
@@ -25,6 +27,11 @@ authRoutes.post("/login", authRateLimit, loginController);
 authRoutes.post("/register", registerRateLimit, registerController);
 authRoutes.get("/google", oauthRateLimit, googleStartController);
 authRoutes.get("/google/callback", oauthRateLimit, googleCallbackController);
+// Verificación de correo (flujo comercial). El reenvío usa optionalAuth:
+// autenticado reenvía a su propia cuenta; público requiere email (respuesta
+// genérica siempre, mismo patrón anti-enumeración que forgot-password).
+authRoutes.post("/verify-email", authRateLimit, verifyEmailController);
+authRoutes.post("/resend-verification", authRateLimit, optionalAuth, resendVerificationController);
 authRoutes.post("/forgot-password", authRateLimit, forgotPasswordController);
 authRoutes.get("/reset-password/validate", authRateLimit, validateResetTokenController);
 authRoutes.post("/reset-password", authRateLimit, resetPasswordController);

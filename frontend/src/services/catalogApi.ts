@@ -1,4 +1,5 @@
 import api from '../lib/api'
+import { normalizePaginatedResponse, type PagedResult } from '../lib/pagination'
 
 // ─── Tipos (espejo del contrato /api/catalog del backend) ───────────────────
 
@@ -52,6 +53,10 @@ export interface ItemFilters {
   categoryId?: string
   type?: CatalogItemType
   status?: 'active' | 'inactive'
+  page?: number
+  limit?: number
+  sortBy?: 'name' | 'price' | 'createdAt'
+  sortOrder?: 'asc' | 'desc'
 }
 
 // ─── Categorías ──────────────────────────────────────────────────────────────
@@ -75,8 +80,14 @@ export const catalogApi = {
 
   // ─── Ítems ─────────────────────────────────────────────────────────────────
 
-  listItems: (filters: ItemFilters = {}) =>
-    api.get<CatalogItem[]>('/api/catalog/items', filters as Record<string, string | undefined>),
+  // Contrato paginado: { items, total, page, limit, pages } (filtros server-side)
+  listItems: async (filters: ItemFilters = {}): Promise<PagedResult<CatalogItem>> => {
+    const data = await api.get<unknown>(
+      '/api/catalog/items',
+      filters as Record<string, string | number | undefined>
+    )
+    return normalizePaginatedResponse<CatalogItem>(data)
+  },
 
   createItem: (data: CatalogItemInput) => api.post<CatalogItem>('/api/catalog/items', data),
 

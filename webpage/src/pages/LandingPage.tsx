@@ -5,6 +5,8 @@ import { CoreFeatures } from '@/components/landing/CoreFeatures'
 import { Integrations } from '@/components/landing/Integrations'
 import { FinalCTA } from '@/components/landing/FinalCTA'
 import { Footer } from '@/components/layout/Footer'
+import { SEOHead } from '@/components/seo/SEOHead'
+import { SOFTWARE_APPLICATION_JSON_LD } from '@/lib/seo'
 
 /**
  * Landing page de la plataforma.
@@ -21,6 +23,12 @@ import { Footer } from '@/components/layout/Footer'
 export default function LandingPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Sendwary | Automatización inteligente para negocios"
+        description="Automatiza atención, solicitudes, cotizaciones, citas y seguimiento con agentes IA. Sendwary ayuda a negocios a responder más rápido sin perder control humano."
+        path="/"
+        jsonLd={SOFTWARE_APPLICATION_JSON_LD}
+      />
       <Navbar />
       <main>
         <Hero />

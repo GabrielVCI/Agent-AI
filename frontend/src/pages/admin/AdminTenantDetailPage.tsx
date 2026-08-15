@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Save, Ban, CheckCircle, XCircle, UserPlus } from 'lucide-react'
+import {
+  ArrowLeft,
+  Save,
+  Ban,
+  CheckCircle,
+  XCircle,
+  UserPlus,
+  Mail,
+  CreditCard,
+  Play,
+  Flag,
+} from 'lucide-react'
 import { AdminTenant } from '../../types'
 import api from '../../lib/api'
 import { Card, CardHeader } from '../../components/ui/Card'
@@ -10,11 +21,301 @@ import Modal from '../../components/ui/Modal'
 import Alert from '../../components/ui/Alert'
 import LoadingSpinner from '../../components/ui/LoadingSpinner'
 import TenantVoiceCard from '../../components/admin/TenantVoiceCard'
+import TenantWhatsAppCard from '../../components/admin/TenantWhatsAppCard'
 
 interface TenantDetail extends AdminTenant {
   usedConversations: number
   usedAudioMinutes: number
   recentErrors?: string[]
+}
+
+const LIFECYCLE_LABELS: Record<string, string> = {
+  REGISTERED: 'Registrado',
+  EMAIL_PENDING: 'Correo pendiente',
+  EMAIL_VERIFIED: 'Correo verificado',
+  IMPLEMENTATION_PENDING: 'Implementación pendiente',
+  IMPLEMENTATION_IN_PROGRESS: 'Implementación en proceso',
+  IMPLEMENTATION_COMPLETED: 'Implementación completada',
+  ACTIVE: 'Activo',
+  SUSPENDED: 'Suspendido',
+  CANCELLED: 'Cancelado',
+}
+
+/** yyyy-MM-dd para inputs type="date" (o vacío) */
+function toDateInput(value: unknown): string {
+  if (!value) return ''
+  const d = new Date(String(value))
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
+}
+
+function formatDate(value: unknown): string {
+  if (!value) return '—'
+  const d = new Date(String(value))
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('es')
+}
+
+/**
+ * Card "Implementación y activación": control SUPER_ADMIN del flujo comercial
+ * (pago de implementación, inicio/fin, activación final → primer mes, bypass
+ * temporal del paywall y reenvío de correos).
+ */
+function ImplementationCard({
+  tenantId,
+  tenant,
+  onUpdated,
+  notify,
+}: {
+  tenantId: string
+  tenant: Record<string, any>
+  onUpdated: (t: Record<string, any>) => void
+  notify: (type: 'success' | 'error', text: string) => void
+}) {
+  const [saving, setSaving] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [lifecycle, setLifecycle] = useState('')
+  const [expectedEnd, setExpectedEnd] = useState('')
+  const [finalActivation, setFinalActivation] = useState('')
+  const [bypassUntil, setBypassUntil] = useState('')
+  const [bypassReason, setBypassReason] = useState('')
+  const [implNotes, setImplNotes] = useState('')
+
+  useEffect(() => {
+    setLifecycle(String(tenant.lifecycleStatus ?? 'ACTIVE'))
+    setExpectedEnd(toDateInput(tenant.implementationExpectedEndAt))
+    setFinalActivation(toDateInput(tenant.finalActivationDate))
+    setBypassUntil(toDateInput(tenant.paywallBypassUntil))
+    setBypassReason(String(tenant.paywallBypassReason ?? ''))
+    setImplNotes(String(tenant.internalImplementationNotes ?? ''))
+  }, [tenant])
+
+  const put = async (body: Record<string, unknown>, okMsg: string, key?: string) => {
+    if (key) setBusy(key)
+    else setSaving(true)
+    try {
+      const updated = await api.put<Record<string, any>>(
+        `/api/admin/tenants/${tenantId}/implementation`,
+        body
+      )
+      onUpdated(updated)
+      notify('success', okMsg)
+    } catch (err: unknown) {
+      notify('error', (err as { message?: string })?.message || 'Error al actualizar la implementación')
+    } finally {
+      setSaving(false)
+      setBusy(null)
+    }
+  }
+
+  const resend = async (endpoint: string, key: string) => {
+    setBusy(key)
+    try {
+      const res = await api.post<{ sent?: boolean }>(`/api/admin/tenants/${tenantId}/${endpoint}`)
+      notify('success', (res as any)?.message ?? 'Correo reenviado')
+    } catch (err: unknown) {
+      notify('error', (err as { message?: string })?.message || 'Error al reenviar el correo')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const feePaid = Boolean(tenant.implementationFeePaidAt)
+  const bypassActive = Boolean(
+    tenant.paywallBypassUntil && new Date(String(tenant.paywallBypassUntil)) > new Date()
+  )
+
+  return (
+    <Card>
+      <CardHeader
+        title="Implementación y activación"
+        description="Flujo comercial: pago de implementación, activación final (inicia el primer mes) y bypass temporal del paywall"
+      />
+
+      {/* Resumen de estado */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 text-xs">
+        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+          <p className="text-slate-500">Estado comercial</p>
+          <p className="font-semibold text-slate-800 mt-0.5">
+            {LIFECYCLE_LABELS[String(tenant.lifecycleStatus)] ?? tenant.lifecycleStatus ?? '—'}
+          </p>
+        </div>
+        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+          <p className="text-slate-500">Correo verificado</p>
+          <p className="font-semibold text-slate-800 mt-0.5">{formatDate(tenant.emailVerifiedAt)}</p>
+        </div>
+        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+          <p className="text-slate-500">Pago implementación</p>
+          <p className={`font-semibold mt-0.5 ${feePaid ? 'text-emerald-600' : 'text-amber-600'}`}>
+            {feePaid ? formatDate(tenant.implementationFeePaidAt) : 'Pendiente'}
+          </p>
+        </div>
+        <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+          <p className="text-slate-500">Primer mes termina</p>
+          <p className="font-semibold text-slate-800 mt-0.5">{formatDate(tenant.firstMonthEndsAt)}</p>
+        </div>
+      </div>
+
+      {/* Acciones rápidas del flujo */}
+      <div className="flex flex-wrap gap-2 mb-5">
+        {!feePaid ? (
+          <Button
+            size="sm"
+            variant="outline"
+            icon={<CreditCard className="h-4 w-4" />}
+            loading={busy === 'fee'}
+            onClick={() => put({ implementationFeePaid: true }, 'Pago de implementación registrado', 'fee')}
+          >
+            Marcar pago recibido
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={busy === 'fee'}
+            onClick={() => put({ implementationFeePaid: false }, 'Pago de implementación desmarcado', 'fee')}
+          >
+            Desmarcar pago
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          icon={<Play className="h-4 w-4" />}
+          loading={busy === 'start'}
+          onClick={() =>
+            put(
+              { implementationStartedAt: new Date().toISOString(), lifecycleStatus: 'IMPLEMENTATION_IN_PROGRESS' },
+              'Implementación iniciada',
+              'start'
+            )
+          }
+        >
+          Iniciar implementación
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          icon={<Flag className="h-4 w-4" />}
+          loading={busy === 'complete'}
+          onClick={() => put({ lifecycleStatus: 'IMPLEMENTATION_COMPLETED' }, 'Implementación marcada como completada', 'complete')}
+        >
+          Marcar completada
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          icon={<Mail className="h-4 w-4" />}
+          loading={busy === 'resend-verify'}
+          onClick={() => resend('resend-verification', 'resend-verify')}
+        >
+          Reenviar verificación
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          icon={<Mail className="h-4 w-4" />}
+          loading={busy === 'resend-impl'}
+          onClick={() => resend('resend-implementation-email', 'resend-impl')}
+        >
+          Reenviar correo implementación
+        </Button>
+        {!feePaid && (
+          <Button
+            size="sm"
+            variant="outline"
+            icon={<CreditCard className="h-4 w-4" />}
+            loading={busy === 'reminder'}
+            onClick={() => resend('send-payment-reminder', 'reminder')}
+          >
+            Recordatorio de pago
+          </Button>
+        )}
+      </div>
+
+      {/* Edición detallada */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Estado comercial</label>
+          <select className="input w-full" value={lifecycle} onChange={e => setLifecycle(e.target.value)}>
+            {Object.entries(LIFECYCLE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Fin estimado de implementación</label>
+          <input type="date" className="input w-full" value={expectedEnd} onChange={e => setExpectedEnd(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">
+            Fecha de activación final
+            <span className="text-slate-400"> (inicia el primer mes)</span>
+          </label>
+          <input type="date" className="input w-full" value={finalActivation} onChange={e => setFinalActivation(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">
+            Bypass de paywall hasta{bypassActive ? ' (activo)' : ''}
+          </label>
+          <input type="date" className="input w-full" value={bypassUntil} onChange={e => setBypassUntil(e.target.value)} />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-xs text-slate-500 mb-1">Motivo del bypass</label>
+          <input
+            className="input w-full"
+            value={bypassReason}
+            onChange={e => setBypassReason(e.target.value)}
+            placeholder="Ej.: implementación pagada, acceso anticipado autorizado"
+          />
+        </div>
+        <div className="sm:col-span-3">
+          <label className="block text-xs text-slate-500 mb-1">
+            Notas internas de implementación (nunca visibles para el cliente)
+          </label>
+          <textarea
+            className="input w-full"
+            rows={2}
+            value={implNotes}
+            onChange={e => setImplNotes(e.target.value)}
+            placeholder="Detalle técnico del avance, pendientes, acuerdos…"
+          />
+        </div>
+      </div>
+
+      <div className="flex justify-between items-center mt-4">
+        {bypassActive ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={busy === 'clear-bypass'}
+            onClick={() => put({ paywallBypassUntil: null }, 'Bypass de paywall eliminado', 'clear-bypass')}
+          >
+            Quitar bypass
+          </Button>
+        ) : (
+          <span />
+        )}
+        <Button
+          loading={saving}
+          icon={<Save className="h-4 w-4" />}
+          onClick={() =>
+            put(
+              {
+                lifecycleStatus: lifecycle || undefined,
+                implementationExpectedEndAt: expectedEnd ? new Date(expectedEnd).toISOString() : null,
+                finalActivationDate: finalActivation ? new Date(finalActivation).toISOString() : null,
+                paywallBypassUntil: bypassUntil ? new Date(bypassUntil).toISOString() : null,
+                paywallBypassReason: bypassReason.trim() || null,
+                internalImplementationNotes: implNotes.trim() || null,
+              },
+              'Implementación actualizada'
+            )
+          }
+        >
+          Guardar implementación
+        </Button>
+      </div>
+    </Card>
+  )
 }
 
 export default function AdminTenantDetailPage() {
@@ -236,6 +537,37 @@ export default function AdminTenantDetailPage() {
               <option value="OVERDUE">Atrasado</option>
             </select>
           </div>
+
+          {/* LemonSqueezy (solo lectura: lo escribe el webhook, no el admin) */}
+          {(() => {
+            const sub = (tenant as unknown as Record<string, any>)?.subscription ?? {}
+            if (!sub.lemonSqueezySubscriptionId && !sub.lastWebhookAt) return null
+            return (
+              <div className="sm:col-span-2 lg:col-span-3 rounded-lg bg-slate-50 border border-slate-200 p-3 text-xs space-y-1">
+                <p className="font-medium text-slate-700">LemonSqueezy (automático)</p>
+                {sub.lemonSqueezySubscriptionId && (
+                  <p className="text-slate-600">
+                    Subscription ID: <code>{sub.lemonSqueezySubscriptionId}</code>
+                  </p>
+                )}
+                {sub.lemonSqueezyCustomerId && (
+                  <p className="text-slate-600">
+                    Customer ID: <code>{sub.lemonSqueezyCustomerId}</code>
+                  </p>
+                )}
+                {sub.renewsAt && (
+                  <p className="text-slate-600">
+                    Renueva: {new Date(sub.renewsAt).toLocaleString()}
+                  </p>
+                )}
+                {sub.lastWebhookAt && (
+                  <p className="text-slate-500">
+                    Último webhook: {new Date(sub.lastWebhookAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
           <div>
             <label className="block text-xs text-slate-500 mb-1">Mensualidad custom (USD)</label>
             <input
@@ -279,6 +611,16 @@ export default function AdminTenantDetailPage() {
         </div>
       </Card>
 
+      {/* Flujo comercial: implementación y activación final */}
+      {id && (
+        <ImplementationCard
+          tenantId={id}
+          tenant={tenant as unknown as Record<string, any>}
+          onUpdated={updated => setTenant(prev => (prev ? ({ ...prev, ...updated } as TenantDetail) : prev))}
+          notify={(type, text) => setMessage({ type, text })}
+        />
+      )}
+
       {/* Uso del mes */}
       <Card>
         <CardHeader
@@ -319,6 +661,9 @@ export default function AdminTenantDetailPage() {
           )
         })()}
       </Card>
+
+      {/* WhatsApp: estado, conexión asistida y notas internas */}
+      {id && <TenantWhatsAppCard tenantId={id} />}
 
       {/* Llamadas IA (config + uso + reset) */}
       {id && <TenantVoiceCard tenantId={id} />}

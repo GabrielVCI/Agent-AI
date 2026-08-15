@@ -7,6 +7,7 @@ import {
   type ContactErrors,
   initialContactData,
   validateContact,
+  CONTACT_MAX,
   TIPOS_NEGOCIO,
   MOTIVOS,
   PLANES,
@@ -14,10 +15,14 @@ import {
   PLAN_PARAM_MAP,
   MOTIVO_PARAM_MAP,
 } from '@/lib/contact'
+import { submitToWeb3Forms } from '@/lib/web3forms'
+import { getRecaptchaToken } from '@/lib/recaptcha'
+import { STORAGE_KEYS, canSubmitForm, markFormSubmitted, isSubmittedTooFast } from '@/lib/spam-guard'
 
 type Status = 'idle' | 'submitting' | 'success' | 'error'
 
-const ENDPOINT = import.meta.env.VITE_CONTACT_ENDPOINT || '/.netlify/functions/contact'
+const COOLDOWN_MESSAGE = 'Ya recibimos una solicitud recientemente. Intenta nuevamente en unos segundos.'
+const ERROR_MESSAGE = 'No pudimos enviar tu solicitud en este momento. Inténtalo nuevamente.'
 
 /* -------------------------------------------------------------------------- */
 /*  Estilos base                                                               */
@@ -83,6 +88,8 @@ export function ContactForm() {
   const [errors, setErrors] = React.useState<ContactErrors>({})
   const [status, setStatus] = React.useState<Status>('idle')
   const [serverError, setServerError] = React.useState<string>('')
+  // Marca de tiempo de montaje: un envío demasiado rápido sugiere un bot.
+  const formStartedAtRef = React.useRef(Date.now())
 
   // Preselección según query params (?plan=, ?motivo=, ?tipo=).
   React.useEffect(() => {
@@ -109,6 +116,13 @@ export function ContactForm() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+
+    // Honeypot: los bots suelen rellenar todos los campos, incluido este oculto.
+    if (data.companyWebsite) {
+      setStatus('success')
+      return
+    }
+
     const validation = validateContact(data)
     if (Object.keys(validation).length > 0) {
       setErrors(validation)
@@ -118,21 +132,49 @@ export function ContactForm() {
       return
     }
 
+    // Envío sospechosamente rápido: tratamos como bot, sin bloquear con un error confuso.
+    if (isSubmittedTooFast(formStartedAtRef.current)) {
+      setStatus('success')
+      return
+    }
+
+    if (!canSubmitForm(STORAGE_KEYS.contact)) {
+      setStatus('error')
+      setServerError(COOLDOWN_MESSAGE)
+      return
+    }
+
     setStatus('submitting')
     setServerError('')
     try {
-      const res = await fetch(ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...data, origen: window.location.href }),
+      // Se ejecuta para tener visibilidad de bots en el panel de Google, pero el
+      // token NO se envía a Web3Forms: su plan gratuito rechaza el envío completo
+      // si el campo "g-recaptcha-response" viene presente ("Pro feature").
+      await getRecaptchaToken('contact_form')
+
+      await submitToWeb3Forms({
+        subject: 'Nueva solicitud de contacto - Sendwary',
+        from_name: 'Sitio web Sendwary',
+        name: data.nombre,
+        email: data.email,
+        replyto: data.email,
+        phone: data.telefono,
+        business_name: data.negocio,
+        business_type: data.tipoNegocio,
+        contact_reason: data.motivo,
+        interested_plan: data.plan || undefined,
+        monthly_messages: data.volumen || undefined,
+        current_system: data.sistemaActual || undefined,
+        message: data.mensaje,
+        source: 'Página de contacto',
+        page_url: window.location.href,
       })
-      if (!res.ok) throw new Error('bad status')
+
+      markFormSubmitted(STORAGE_KEYS.contact)
       setStatus('success')
     } catch {
       setStatus('error')
-      setServerError(
-        'No pudimos enviar la solicitud en este momento. Inténtalo nuevamente o contáctanos por WhatsApp.',
-      )
+      setServerError(ERROR_MESSAGE)
     }
   }
 
@@ -140,6 +182,7 @@ export function ContactForm() {
     setData(initialContactData)
     setErrors({})
     setStatus('idle')
+    formStartedAtRef.current = Date.now()
   }
 
   /* --- Estado de éxito --------------------------------------------------- */
@@ -153,7 +196,7 @@ export function ContactForm() {
           Solicitud enviada correctamente
         </h3>
         <p className="mt-3 max-w-sm text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
-          Revisaremos tu caso y te contactaremos pronto con una recomendación según tu negocio.
+          Revisaremos tu caso y te contactaremos pronto.
         </p>
         <button
           type="button"
@@ -185,6 +228,7 @@ export function ContactForm() {
             id="nombre"
             type="text"
             autoComplete="name"
+            maxLength={CONTACT_MAX.nombre}
             value={data.nombre}
             onChange={(e) => update('nombre', e.target.value)}
             aria-invalid={!!errors.nombre}
@@ -199,6 +243,7 @@ export function ContactForm() {
             id="email"
             type="email"
             autoComplete="email"
+            maxLength={CONTACT_MAX.email}
             value={data.email}
             onChange={(e) => update('email', e.target.value)}
             aria-invalid={!!errors.email}
@@ -213,6 +258,7 @@ export function ContactForm() {
             id="telefono"
             type="tel"
             autoComplete="tel"
+            maxLength={CONTACT_MAX.telefono}
             value={data.telefono}
             onChange={(e) => update('telefono', e.target.value)}
             aria-invalid={!!errors.telefono}
@@ -227,6 +273,7 @@ export function ContactForm() {
             id="negocio"
             type="text"
             autoComplete="organization"
+            maxLength={CONTACT_MAX.negocio}
             value={data.negocio}
             onChange={(e) => update('negocio', e.target.value)}
             aria-invalid={!!errors.negocio}
@@ -307,14 +354,21 @@ export function ContactForm() {
         <Field
           id="sistemaActual"
           label={isIntegracion ? 'Sistema actual (recomendado)' : 'Sistema actual'}
+          error={errors.sistemaActual}
           hint={isIntegracion ? 'Cuéntanos qué sistema usas para evaluar la integración.' : undefined}
         >
           <input
             id="sistemaActual"
             type="text"
+            maxLength={CONTACT_MAX.sistemaActual}
             value={data.sistemaActual}
             onChange={(e) => update('sistemaActual', e.target.value)}
-            className={cn(controlCls(), isIntegracion && 'ring-2 ring-brand-400/40')}
+            aria-invalid={!!errors.sistemaActual}
+            aria-describedby={errors.sistemaActual ? 'sistemaActual-error' : undefined}
+            className={cn(
+              controlCls(!!errors.sistemaActual),
+              isIntegracion && 'ring-2 ring-brand-400/40',
+            )}
             placeholder="Odoo, SAP, QuickBooks, Excel, CRM, sistema propio, ninguno…"
           />
         </Field>
@@ -336,6 +390,7 @@ export function ContactForm() {
           <textarea
             id="mensaje"
             rows={4}
+            maxLength={CONTACT_MAX.mensaje}
             value={data.mensaje}
             onChange={(e) => update('mensaje', e.target.value)}
             aria-invalid={!!errors.mensaje}
@@ -399,7 +454,7 @@ export function ContactForm() {
         {status === 'submitting' ? (
           <>
             <Loader2 className="h-4 w-4 animate-spin" />
-            Enviando solicitud…
+            Enviando…
           </>
         ) : (
           <>

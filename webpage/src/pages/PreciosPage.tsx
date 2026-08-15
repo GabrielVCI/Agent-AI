@@ -6,12 +6,15 @@ import {
   CalendarClock,
   Cable,
   ChevronDown,
+  Sparkles,
 } from 'lucide-react'
 import { Navbar } from '@/components/landing/Navbar'
 import { Footer } from '@/components/layout/Footer'
 import { SectionBadge, CtaButtons } from '@/components/ui/page-sections'
 import { PricingTable } from '@/components/ui/pricing-table'
 import { cn } from '@/lib/utils'
+import { SEOHead } from '@/components/seo/SEOHead'
+import { PRICING_JSON_LD } from '@/lib/seo'
 
 /* ========================================================================== */
 /*  Datos de la comparación                                                    */
@@ -120,9 +123,36 @@ const FAQ = [
 /*  Secciones                                                                  */
 /* ========================================================================== */
 
+function WaitlistBanner() {
+  return (
+    <section className="relative bg-white pt-8 dark:bg-neutral-950">
+      <div className="mx-auto max-w-screen-xl px-5 sm:px-6">
+        <div className="flex flex-col items-center justify-between gap-5 rounded-2xl border border-brand-500/30 bg-gradient-to-r from-brand-600/10 via-fuchsia-500/10 to-brand-600/10 px-6 py-6 text-center shadow-sm sm:flex-row sm:text-left dark:border-brand-400/25 dark:from-brand-500/10 dark:via-fuchsia-500/10 dark:to-brand-500/10">
+          <div>
+            <p className="inline-flex items-center gap-1.5 text-sm font-bold text-brand-700 dark:text-brand-300">
+              <Sparkles className="h-4 w-4" />
+              Lista de espera abierta
+            </p>
+            <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-neutral-700 dark:text-neutral-300">
+              Regístrate antes del lanzamiento comercial y recibe un 20% de descuento en la
+              implementación de Sendwary.
+            </p>
+          </div>
+          <a
+            href="#planes"
+            className="inline-flex w-full shrink-0 items-center justify-center rounded-xl bg-brand-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-brand-600/25 transition-all hover:bg-brand-500 hover:shadow-brand-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white sm:w-auto dark:focus-visible:ring-offset-neutral-950"
+          >
+            Ver planes disponibles
+          </a>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function PricingHero() {
   return (
-    <section className="relative overflow-hidden bg-white pt-16 dark:bg-neutral-950">
+    <section className="relative overflow-hidden bg-white pt-10 dark:bg-neutral-950">
       <div className="pointer-events-none absolute left-1/2 top-0 h-[36rem] w-[36rem] -translate-x-1/2 -translate-y-1/3 rounded-full bg-brand-600/15 blur-[140px] dark:bg-brand-600/20" />
 
       <div className="relative mx-auto max-w-screen-xl px-5 py-16 sm:px-6 sm:py-20">
@@ -148,7 +178,7 @@ function PricingHero() {
           </p>
         </div>
 
-        <div className="mt-16">
+        <div id="planes" className="mt-16 scroll-mt-24">
           <PricingTable />
         </div>
       </div>
@@ -409,8 +439,15 @@ function PageCTA() {
 export default function PreciosPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Precios Sendwary | Planes para agentes IA en negocios"
+        description="Conoce los planes de Sendwary para automatizar atención, cotizaciones, citas, audios, catálogo, reportes e integraciones según las necesidades de tu negocio."
+        path="/precios"
+        jsonLd={PRICING_JSON_LD}
+      />
       <Navbar />
       <main>
+        <WaitlistBanner />
         <PricingHero />
         <ComparisonSection />
         <TokensSection />

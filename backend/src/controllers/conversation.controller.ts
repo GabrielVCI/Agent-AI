@@ -9,9 +9,8 @@ import {
   saveHumanMessage,
   updateConversationLastMessage,
 } from "../services/conversation.service.js";
-import {
-  sendWhatsappTextMessage,
-} from "../services/meta-whatsapp.service.js";
+import { sendWhatsappTextMessage } from "../services/meta-whatsapp.service.js";
+import { resolveSendCredentials } from "../services/whatsapp-integration.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { logger } from "../config/logger.js";
 import { bumpUsage } from "../services/billing.service.js";
@@ -24,6 +23,11 @@ const paginationSchema = z.object({
   search: z.string().optional(),
   /** true => solo conversaciones con handoff humano abierto (pendientes de atención) */
   pendingHuman: z.coerce.boolean().optional(),
+  /** true => solo conversaciones con al menos una cotización */
+  withQuote: z.coerce.boolean().optional(),
+  /** Rango sobre lastMessageAt (YYYY-MM-DD) */
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
   /** true => solo conversaciones asignadas al usuario autenticado */
   assignedToMe: z.coerce.boolean().optional(),
   /** true => solo conversaciones sin usuario asignado */
@@ -56,14 +60,25 @@ export async function listConversationsController(
       return;
     }
 
-    const { page, limit, status, agentId, search, pendingHuman, assignedToMe, unassigned, labelId, awaiting } =
-      parsed.data;
+    const {
+      page, limit, status, agentId, search, pendingHuman, assignedToMe,
+      unassigned, labelId, awaiting, withQuote, dateFrom, dateTo,
+    } = parsed.data;
     const skip = (page - 1) * limit;
 
     const where = {
       tenantId: req.tenantId,
       ...(status ? { status } : {}),
       ...(agentId ? { agentId } : {}),
+      ...(withQuote ? { quotes: { some: {} } } : {}),
+      ...(dateFrom || dateTo
+        ? {
+            lastMessageAt: {
+              ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+              ...(dateTo ? { lte: new Date(`${dateTo}T23:59:59.999`) } : {}),
+            },
+          }
+        : {}),
       ...(assignedToMe && req.user ? { assignedToUserId: req.user.id } : {}),
       ...(unassigned ? { assignedToUserId: null } : {}),
       ...(labelId ? { labels: { some: { labelId } } } : {}),
@@ -89,6 +104,7 @@ export async function listConversationsController(
               { whatsappPhone: { contains: search, mode: "insensitive" as const } },
               { customer: { is: { phone: { contains: search, mode: "insensitive" as const } } } },
               { customer: { is: { name: { contains: search, mode: "insensitive" as const } } } },
+              { lastMessagePreview: { contains: search, mode: "insensitive" as const } },
             ],
           }
         : {}),
@@ -318,10 +334,15 @@ export async function replyToConversationController(
 
     // Send via WhatsApp if we have the phone and a phoneNumberId
     if (conversation.whatsappPhone && conversation.agent?.whatsappPhoneNumberId) {
+      // Token del tenant (integración propia) o fallback global si está permitido
+      const credentials = await resolveSendCredentials(
+        conversation.agent.whatsappPhoneNumberId
+      );
       await sendWhatsappTextMessage({
         to: conversation.whatsappPhone,
         text: parsed.data.message,
         phoneNumberId: conversation.agent.whatsappPhoneNumberId,
+        credentials: credentials ?? undefined,
       }).catch((err) =>
         logger.error(
           `[CONVERSATIONS] error sending manual reply via WhatsApp: ${

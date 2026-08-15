@@ -8,6 +8,26 @@ export interface User {
   tenantId: string | null
   status: string
   avatarUrl?: string
+  /** Verificación de correo (flujo comercial); SUPER_ADMIN siempre true */
+  emailVerified?: boolean
+}
+
+/** Contrato de GET /api/billing/activation-status (flujo comercial premium) */
+export interface ActivationStatus {
+  emailVerified: boolean
+  lifecycleStatus: string | null
+  implementationStatus: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | null
+  implementationFeePaid: boolean
+  implementationFeePaidAt: string | null
+  implementationStartedAt: string | null
+  implementationExpectedEndAt: string | null
+  finalActivationDate: string | null
+  firstMonthEndsAt: string | null
+  hasActiveSubscription: boolean
+  shouldShowPaywall: boolean
+  shouldShowImplementationScreen: boolean
+  paywallBypassUntil: string | null
+  reason: string
 }
 
 export interface Company {

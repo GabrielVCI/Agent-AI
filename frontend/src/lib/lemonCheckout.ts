@@ -22,8 +22,11 @@ declare global {
 
 const LEMON_JS_SRC = 'https://assets.lemonsqueezy.com/lemon.js'
 
-/** Carga lemon.js bajo demanda (solo cuando el usuario intenta pagar). */
-async function ensureLemonJs(): Promise<boolean> {
+/**
+ * Carga lemon.js UNA SOLA VEZ (deduplicado por selector de script). El paywall
+ * lo precarga al montar; el resto de la app lo carga bajo demanda al pagar.
+ */
+export async function ensureLemonJs(): Promise<boolean> {
   if (window.LemonSqueezy) return true
   try {
     await new Promise<void>((resolve, reject) => {

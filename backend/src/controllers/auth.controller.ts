@@ -18,8 +18,13 @@ import {
   validateResetToken,
   resetPasswordWithToken,
 } from "../services/password-reset.service.js";
+import {
+  verifyEmailWithToken,
+  resendVerificationEmail,
+} from "../services/email-verification.service.js";
+import { prisma } from "../config/prisma.js";
 import { generateToken } from "../lib/crypto.js";
-import { env } from "../config/env.js";
+import { env, sessionCookieAttrs } from "../config/env.js";
 import { AppError } from "../middlewares/error.middleware.js";
 
 const loginSchema = z.object({
@@ -51,18 +56,9 @@ const registerSchema = z
 const GOOGLE_STATE_COOKIE = "g_oauth_state";
 
 function setCookieOptions() {
-  const isProd = env.NODE_ENV === "production";
   return {
-    httpOnly: true,
-    // En dev sobre http no se puede usar Secure (el navegador descartaría la cookie).
-    secure: isProd,
-    // dev: "lax" para que la cookie viaje en peticiones same-site del SPA local.
-    // prod: "strict" (front y API bajo el mismo dominio).
-    sameSite: isProd ? ("strict" as const) : ("lax" as const),
+    ...sessionCookieAttrs(),
     maxAge: env.SESSION_TTL_SECONDS * 1000,
-    // Solo fijar domain si está configurado; en localhost debe omitirse (cookie host-only).
-    ...(env.COOKIE_DOMAIN ? { domain: env.COOKIE_DOMAIN } : {}),
-    path: "/",
   };
 }
 
@@ -134,20 +130,29 @@ export async function registerController(
       return;
     }
 
-    const { token, user } = await registerUser(parsed.data, {
+    const { token, user, verificationEmailSent } = await registerUser(parsed.data, {
       userAgent: req.headers["user-agent"],
       ipAddress: req.ip,
     });
 
+    // La cuenta queda creada aunque el correo falle: el usuario puede pedir el
+    // reenvío desde la pantalla de verificación (nunca se revierte el registro).
+    const emailFailedInProd = !verificationEmailSent && env.NODE_ENV === "production";
+
     res.cookie(env.SESSION_COOKIE_NAME, token, setCookieOptions());
     res.status(201).json({
       success: true,
+      message: emailFailedInProd
+        ? "Tu cuenta fue creada, pero no pudimos enviar el correo de verificación. Puedes solicitar reenviarlo."
+        : "Registro creado. Revisa tu correo para verificar tu cuenta.",
       data: {
         id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
         tenantId: user.tenantId,
+        emailVerified: false,
+        verificationEmailSent,
       },
     });
   } catch (err) {
@@ -171,7 +176,7 @@ export function googleStartController(req: Request, res: Response, next: NextFun
     const state = generateToken(16);
     res.cookie(GOOGLE_STATE_COOKIE, state, {
       httpOnly: true,
-      secure: env.NODE_ENV === "production",
+      secure: env.cookieSecure,
       sameSite: "lax", // debe viajar en el redirect top-level desde Google
       maxAge: 10 * 60 * 1000,
       path: "/",
@@ -229,7 +234,7 @@ export async function logoutController(
     if (token) {
       await logoutSession(token);
     }
-    res.clearCookie(env.SESSION_COOKIE_NAME, { path: "/" });
+    res.clearCookie(env.SESSION_COOKIE_NAME, sessionCookieAttrs());
     res.json({ success: true, message: "Sesión cerrada" });
   } catch (err) {
     next(err);
@@ -244,7 +249,7 @@ export async function logoutAllController(
   try {
     if (!req.user) throw new AppError("No autenticado", 401);
     await logoutAllSessions(req.user.id);
-    res.clearCookie(env.SESSION_COOKIE_NAME, { path: "/" });
+    res.clearCookie(env.SESSION_COOKIE_NAME, sessionCookieAttrs());
     res.json({ success: true, message: "Todas las sesiones cerradas" });
   } catch (err) {
     next(err);
@@ -258,6 +263,12 @@ export async function meController(
 ): Promise<void> {
   try {
     if (!req.user) throw new AppError("No autenticado", 401);
+    // emailVerifiedAt no vive en la cache de sesión: lectura fresca de DB para
+    // que la verificación se refleje sin re-login.
+    const dbUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { emailVerifiedAt: true },
+    });
     res.json({
       success: true,
       data: {
@@ -267,7 +278,78 @@ export async function meController(
         role: req.user.role,
         tenantId: req.user.tenantId,
         status: req.user.status,
+        emailVerified: req.user.role === "SUPER_ADMIN" ? true : Boolean(dbUser?.emailVerifiedAt),
       },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Verificación de correo ──────────────────────────────────────────────────
+
+const verifyEmailSchema = z.object({
+  token: z.string().min(32, "Token inválido"),
+});
+
+export async function verifyEmailController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const parsed = verifyEmailSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        message: "El enlace de verificación no es válido o ya expiró.",
+      });
+      return;
+    }
+
+    const result = await verifyEmailWithToken(parsed.data.token);
+    res.json({
+      success: true,
+      message: result.alreadyVerified
+        ? "Tu cuenta ya estaba verificada. Puedes continuar en Sendwary."
+        : "Cuenta verificada. Revisa tu correo: te enviamos los siguientes pasos.",
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+const resendVerificationSchema = z.object({
+  email: z.string().email("Email inválido").optional(),
+});
+
+/** Respuesta SIEMPRE genérica: no revela si el correo existe ni su estado. */
+export async function resendVerificationController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const parsed = resendVerificationSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        message: "Datos inválidos",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+      return;
+    }
+
+    // Usuario autenticado: reenvía a su propia cuenta; si no, requiere email.
+    if (req.user) {
+      await resendVerificationEmail({ userId: req.user.id });
+    } else if (parsed.data.email) {
+      await resendVerificationEmail({ email: parsed.data.email });
+    }
+
+    res.json({
+      success: true,
+      message: "Si tu cuenta está pendiente de verificación, recibirás un nuevo correo en unos minutos.",
     });
   } catch (err) {
     next(err);

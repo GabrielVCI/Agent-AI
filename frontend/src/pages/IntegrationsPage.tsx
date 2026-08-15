@@ -11,6 +11,8 @@ import Badge from '../components/ui/Badge'
 import Alert from '../components/ui/Alert'
 import Modal from '../components/ui/Modal'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
+import WhatsAppWizard from '../components/integrations/WhatsAppWizard'
+import type { WhatsAppHealth } from '../components/integrations/whatsapp.types'
 
 // ─── Contratos con el backend ────────────────────────────────────────────────
 
@@ -243,7 +245,9 @@ export default function IntegrationsPage() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [importOpen, setImportOpen] = useState(false)
+  const [whatsappOpen, setWhatsappOpen] = useState(false)
   const [downloading, setDownloading] = useState<string | null>(null)
+  const [waHealth, setWaHealth] = useState<WhatsAppHealth | null>(null)
 
   const load = useCallback(() => {
     api
@@ -253,6 +257,13 @@ export default function IntegrationsPage() {
         setError(err?.message || 'No se pudieron cargar las integraciones')
       )
       .finally(() => setLoading(false))
+
+    // Estado de WhatsApp en lenguaje de negocio (qué falta para que funcione).
+    // Fallo transitorio: la card se muestra igual, solo sin el detalle.
+    api
+      .get<WhatsAppHealth>('/api/integrations/whatsapp/health')
+      .then(setWaHealth)
+      .catch(() => setWaHealth(null))
   }, [])
 
   useEffect(() => {
@@ -307,6 +318,7 @@ export default function IntegrationsPage() {
         {cards.map(card => {
           const meta = statusMeta[card.status] ?? statusMeta.COMING_SOON
           const isExcel = card.id === 'excel'
+          const isWhatsapp = card.id === 'whatsapp'
           return (
             <Card key={card.id} className="flex flex-col">
               <div className="flex items-start justify-between gap-3">
@@ -359,6 +371,51 @@ export default function IntegrationsPage() {
                   adelante.
                 </p>
               )}
+
+              {isWhatsapp && waHealth && (
+                <div className="mt-3 rounded-lg bg-slate-50 border border-slate-200 p-3">
+                  <p
+                    className={`text-xs font-medium ${
+                      waHealth.healthy ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    {waHealth.healthy ? '✓ Todo listo' : 'Falta completar'}
+                  </p>
+                  <p className="text-xs text-slate-600 mt-1">{waHealth.message}</p>
+                  {!waHealth.healthy && waHealth.checklist.length > 0 && (
+                    <ul className="mt-2 space-y-0.5">
+                      {waHealth.checklist.map(item => (
+                        <li
+                          key={item.label}
+                          className={`text-[11px] flex items-center gap-1.5 ${
+                            item.done ? 'text-slate-400' : 'text-slate-600'
+                          }`}
+                        >
+                          {item.done ? (
+                            <CheckCircle2 className="h-3 w-3 text-emerald-500 flex-shrink-0" />
+                          ) : (
+                            <AlertTriangle className="h-3 w-3 text-amber-500 flex-shrink-0" />
+                          )}
+                          {item.label}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {isWhatsapp && canManage && (
+                <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-slate-100">
+                  <Button size="sm" onClick={() => setWhatsappOpen(true)}>
+                    {card.status === 'CONFIGURED' ? 'Gestionar conexión' : 'Conectar WhatsApp'}
+                  </Button>
+                </div>
+              )}
+              {isWhatsapp && !canManage && (
+                <p className="text-xs text-slate-400 mt-2">
+                  Solo el propietario o un administrador pueden configurar WhatsApp.
+                </p>
+              )}
             </Card>
           )
         })}
@@ -368,6 +425,12 @@ export default function IntegrationsPage() {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         onImported={imported => flash(`${imported} cita(s) importada(s). Revísalas en Citas.`)}
+      />
+
+      <WhatsAppWizard
+        open={whatsappOpen}
+        onClose={() => setWhatsappOpen(false)}
+        onChanged={load}
       />
     </div>
   )

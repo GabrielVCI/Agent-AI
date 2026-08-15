@@ -45,6 +45,8 @@ export async function logSupportAudit(input: {
 // ─── Tickets ─────────────────────────────────────────────────────────────────
 
 const TICKET_STATUSES = ["OPEN", "IN_PROGRESS", "WAITING_USER", "RESOLVED", "ESCALATED", "CLOSED"] as const;
+const TICKET_TIERS = ["TIER_1", "TIER_2", "TIER_3"] as const;
+const TICKET_SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const;
 
 export interface CreateTicketInput {
   tenantId?: string | null;
@@ -98,17 +100,30 @@ export interface ListTicketsFilters {
   status?: string;
   tier?: string;
   severity?: string;
+  search?: string;
   limit?: number;
 }
 
 export async function listSupportTickets(filters: ListTicketsFilters) {
   const where: Prisma.SupportTicketWhereInput = {};
   if (filters.tenantId) where.tenantId = filters.tenantId;
+  if (filters.search) {
+    where.OR = [
+      { title: { contains: filters.search, mode: "insensitive" } },
+      { description: { contains: filters.search, mode: "insensitive" } },
+      { category: { contains: filters.search, mode: "insensitive" } },
+    ];
+  }
   if (filters.status && TICKET_STATUSES.includes(filters.status as never)) {
     where.status = filters.status as Prisma.SupportTicketWhereInput["status"];
   }
-  if (filters.tier) where.tier = filters.tier as Prisma.SupportTicketWhereInput["tier"];
-  if (filters.severity) where.severity = filters.severity as Prisma.SupportTicketWhereInput["severity"];
+  // Igual que status: un valor fuera del enum se ignora (nunca llega a Prisma → nunca 500)
+  if (filters.tier && TICKET_TIERS.includes(filters.tier as never)) {
+    where.tier = filters.tier as Prisma.SupportTicketWhereInput["tier"];
+  }
+  if (filters.severity && TICKET_SEVERITIES.includes(filters.severity as never)) {
+    where.severity = filters.severity as Prisma.SupportTicketWhereInput["severity"];
+  }
 
   return prisma.supportTicket.findMany({
     where,

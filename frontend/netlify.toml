@@ -1,0 +1,38 @@
+# Despliegue del PANEL Sendwary (frontend/) en Netlify.
+# La landing comercial tiene su propio netlify.toml en webpage/.
+
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA: cualquier ruta que no sea un archivo real la resuelve React Router.
+# Sin esto, recargar /canales/whatsapp devuelve 404 en Netlify.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# El SDK de Facebook se carga desde connect.facebook.net y abre el popup de
+# Embedded Signup en facebook.com. Sin permitirlos, el flujo no arranca.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# Las variables VITE_* se definen en el panel de Netlify
+# (Site settings → Environment variables), con scope por contexto:
+#   - production      → producción
+#   - branch-deploy   → rama de staging
+# NO se declaran aquí: los valores de netlify.toml tienen prioridad sobre los
+# del panel y dejarían el flag clavado, imposible de cambiar sin un commit.
+#
+# Mínimo para staging:
+#   VITE_API_URL, VITE_META_APP_ID, VITE_META_GRAPH_API_VERSION,
+#   VITE_META_EMBEDDED_SIGNUP_CONFIG_ID, VITE_META_EMBEDDED_SIGNUP_ENABLED
+# Ver docs/STAGING_EMBEDDED_SIGNUP_TESTING.md

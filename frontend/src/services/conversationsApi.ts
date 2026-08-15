@@ -149,6 +149,10 @@ function toArray<T = unknown>(value: unknown): T[] {
 export interface ConversationListFilters {
   agentId?: string
   status?: string
+  /** Búsqueda server-side: nombre/teléfono del cliente o último mensaje */
+  search?: string
+  /** Solo conversaciones con al menos una cotización */
+  withQuote?: boolean
   /** Solo conversaciones con handoff humano abierto */
   pendingHuman?: boolean
   /** Solo conversaciones asignadas al usuario autenticado */
@@ -159,6 +163,11 @@ export interface ConversationListFilters {
   labelId?: string
   /** Solo conversaciones con el cliente esperando respuesta */
   awaiting?: boolean
+  /** Rango sobre lastMessageAt (YYYY-MM-DD) */
+  dateFrom?: string
+  dateTo?: string
+  page?: number
+  limit?: number
 }
 
 export async function listConversations(
@@ -167,11 +176,17 @@ export async function listConversations(
   const data = await api.get<unknown>('/api/conversations', {
     agentId: filters.agentId || undefined,
     status: filters.status || undefined,
+    search: filters.search?.trim() || undefined,
+    withQuote: filters.withQuote ? 'true' : undefined,
     pendingHuman: filters.pendingHuman ? 'true' : undefined,
     assignedToMe: filters.assignedToMe ? 'true' : undefined,
     unassigned: filters.unassigned ? 'true' : undefined,
     labelId: filters.labelId || undefined,
     awaiting: filters.awaiting ? 'true' : undefined,
+    dateFrom: filters.dateFrom || undefined,
+    dateTo: filters.dateTo || undefined,
+    page: filters.page || undefined,
+    limit: filters.limit || undefined,
   })
   return toArray(data).map(mapConversationFromApi)
 }

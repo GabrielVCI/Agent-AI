@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import { invalidateDashboardCache } from "../services/dashboard.service.js";
 import {
   listAgents,
   getAgent,
@@ -67,6 +68,7 @@ export async function createAgentController(
     }
 
     const agent = await createAgent(req.tenantId, parsed.data);
+    void invalidateDashboardCache(req.tenantId);
     res.status(201).json({ success: true, data: agent });
   } catch (err) {
     next(err);
@@ -92,6 +94,7 @@ export async function updateAgentController(
     }
 
     const agent = await updateAgent(req.params.id, req.tenantId, parsed.data);
+    void invalidateDashboardCache(req.tenantId);
     res.json({ success: true, data: agent });
   } catch (err) {
     next(err);
@@ -117,6 +120,7 @@ export async function setAgentStatusController(
     }
 
     const agent = await setAgentStatus(req.params.id, req.tenantId, parsed.data.status);
+    void invalidateDashboardCache(req.tenantId);
     res.json({ success: true, data: agent });
   } catch (err) {
     next(err);
@@ -131,6 +135,7 @@ export async function disableAgentController(
   try {
     if (!req.tenantId) throw new AppError("Empresa no identificada", 403);
     const agent = await disableAgent(req.params.id, req.tenantId);
+    void invalidateDashboardCache(req.tenantId);
     res.json({ success: true, data: agent });
   } catch (err) {
     next(err);

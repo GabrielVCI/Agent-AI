@@ -12,20 +12,29 @@ import {
   uploadWhatsappDocumentMedia,
 } from "../services/meta-whatsapp.service.js";
 import { reserveIdempotency, saveIdempotency } from "../lib/idempotency.js";
+import {
+  resolveSendCredentials,
+  verifyWebhookToken,
+} from "../services/whatsapp-integration.service.js";
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 
-export function verifyMetaWhatsappWebhookController(req: Request, res: Response) {
+// GET de verificación de Meta. Acepta el verify token global (compat con la
+// config actual) o el verifyToken de cualquier WhatsAppIntegration de tenant
+// (cada cliente configura su propia app de Meta con su propio token).
+export async function verifyMetaWhatsappWebhookController(req: Request, res: Response) {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (
-    mode === "subscribe" &&
-    token === env.META_VERIFY_TOKEN &&
-    typeof challenge === "string"
-  ) {
-    return res.status(200).send(challenge);
+  if (mode === "subscribe" && typeof token === "string" && typeof challenge === "string") {
+    try {
+      if (await verifyWebhookToken(token)) {
+        return res.status(200).send(challenge);
+      }
+    } catch (err) {
+      logger.error("[WHATSAPP WEBHOOK] error verificando token:", err);
+    }
   }
 
   return res.sendStatus(403);
@@ -69,6 +78,17 @@ export async function incomingMetaWhatsappWebhookController(
 
         const { tenantId, agentId, agent } = resolved;
 
+        // Credenciales de envío: token propio del tenant (integración
+        // CONNECTED) o fallback global SOLO si está permitido (dev/demo).
+        // Sin credenciales no procesamos (evita gastar IA sin poder responder).
+        const credentials = await resolveSendCredentials(phoneNumberId);
+        if (!credentials) {
+          logger.warn(
+            `[WHATSAPP WEBHOOK] sin credenciales de envío para phone_number_id ${phoneNumberId} (tenant ${tenantId}): integración no CONNECTED y fallback global deshabilitado. No se responde.`
+          );
+          continue;
+        }
+
         for (const message of messages) {
           const phone: string = message.from;
           const messageId: string = message.id;
@@ -109,6 +129,7 @@ export async function incomingMetaWhatsappWebhookController(
                 messageId,
                 mediaId,
                 timestamp,
+                credentials,
               });
 
               if (!result.skipReply && result.replyText) {
@@ -116,6 +137,7 @@ export async function incomingMetaWhatsappWebhookController(
                   to: phone,
                   text: result.replyText,
                   phoneNumberId,
+                  credentials,
                 });
                 logger.info(`[WHATSAPP WEBHOOK] respuesta a audio enviada (${phone})`);
 
@@ -124,6 +146,7 @@ export async function incomingMetaWhatsappWebhookController(
                     const uploaded = await uploadWhatsappDocumentMedia({
                       filePath: result.pdfPath,
                       phoneNumberId,
+                      credentials,
                     });
                     await sendWhatsappDocumentMessage({
                       to: phone,
@@ -131,6 +154,7 @@ export async function incomingMetaWhatsappWebhookController(
                       filename: result.pdfFilename,
                       caption: "Aquí tienes tu cotización en PDF.",
                       phoneNumberId,
+                      credentials,
                     });
                   } catch (pdfErr) {
                     logger.error("[Webhook] Error sending PDF:", pdfErr);
@@ -163,6 +187,7 @@ export async function incomingMetaWhatsappWebhookController(
                   to: phone,
                   text: UNSUPPORTED_MESSAGE_FALLBACK,
                   phoneNumberId,
+                  credentials,
                 });
                 logger.info(`[WHATSAPP WEBHOOK] sent unsupported message fallback`);
               }
@@ -207,6 +232,7 @@ export async function incomingMetaWhatsappWebhookController(
                 to: phone,
                 text: result.replyText,
                 phoneNumberId,
+                credentials,
               });
               logger.info(`[WHATSAPP WEBHOOK] respuesta enviada a WhatsApp (${phone})`);
 
@@ -215,6 +241,7 @@ export async function incomingMetaWhatsappWebhookController(
                   const uploaded = await uploadWhatsappDocumentMedia({
                     filePath: result.pdfPath,
                     phoneNumberId,
+                    credentials,
                   });
                   await sendWhatsappDocumentMessage({
                     to: phone,
@@ -222,6 +249,7 @@ export async function incomingMetaWhatsappWebhookController(
                     filename: result.pdfFilename,
                     caption: "Aquí tienes tu cotización en PDF.",
                     phoneNumberId,
+                    credentials,
                   });
                 } catch (pdfErr) {
                   logger.error("[Webhook] Error sending PDF:", pdfErr);

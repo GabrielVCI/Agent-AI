@@ -4,7 +4,11 @@ import { prisma } from "../config/prisma.js";
 import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { AppError } from "../middlewares/error.middleware.js";
-import { getBillingOverview } from "../services/billing.service.js";
+import {
+  getBillingOverview,
+  getTenantBillingStatus,
+  getTenantActivationState,
+} from "../services/billing.service.js";
 import {
   createCheckout,
   verifyWebhookSignature,
@@ -50,10 +54,84 @@ export async function listPlansController(_req: Request, res: Response, next: Ne
   }
 }
 
+/**
+ * Estado de activación comercial (Parte F): lo consulta el gate del frontend
+ * para decidir entre verificar-correo / implementación / paywall / dashboard.
+ * Accesible SIN tenant (usuarios recién registrados) y para SUPER_ADMIN
+ * (bypass explícito, nunca bloqueado).
+ */
+export async function getActivationStatusController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    if (!req.user) throw new AppError("No autenticado", 401);
+
+    const noGateBase = {
+      lifecycleStatus: null,
+      implementationStatus: null,
+      implementationFeePaid: false,
+      implementationFeePaidAt: null,
+      implementationStartedAt: null,
+      implementationExpectedEndAt: null,
+      finalActivationDate: null,
+      firstMonthEndsAt: null,
+      hasActiveSubscription: false,
+      paywallBypassUntil: null,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: false,
+    };
+
+    if (req.user.role === "SUPER_ADMIN") {
+      res.json({
+        success: true,
+        data: { ...noGateBase, emailVerified: true, reason: "SUPER_ADMIN" },
+      });
+      return;
+    }
+
+    // emailVerifiedAt vive en DB (la cache de sesión no lo trae): lectura fresca
+    const dbUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { emailVerifiedAt: true },
+    });
+    const emailVerified = Boolean(dbUser?.emailVerifiedAt);
+
+    if (!req.user.tenantId) {
+      // Sin empresa todavía: el frontend decide entre verificar-correo y onboarding
+      res.json({
+        success: true,
+        data: { ...noGateBase, emailVerified, reason: emailVerified ? "NO_TENANT" : "EMAIL_NOT_VERIFIED" },
+      });
+      return;
+    }
+
+    const state = await getTenantActivationState(req.user.tenantId, emailVerified);
+    res.json({ success: true, data: state });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getSubscriptionController(req: Request, res: Response, next: NextFunction) {
   try {
     const overview = await getBillingOverview(tenantIdOf(req));
     res.json({ success: true, data: { plan: overview.plan, subscription: overview.subscription } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Estado ligero para el paywall (RequireActiveSubscription): lo consulta el
+ * frontend al montar rutas tenant y en polling post-checkout. SUPER_ADMIN no
+ * llega aquí (no tiene tenant; su bypass vive en el guard del frontend).
+ */
+export async function getBillingStatusController(req: Request, res: Response, next: NextFunction) {
+  try {
+    const status = await getTenantBillingStatus(tenantIdOf(req));
+    res.json({ success: true, data: status });
   } catch (err) {
     next(err);
   }
@@ -87,13 +165,15 @@ export async function createCheckoutController(req: Request, res: Response, next
       return;
     }
 
-    const { checkoutUrl } = await createCheckout({
+    const { checkoutUrl, mode } = await createCheckout({
       tenantId,
       planCode: parsed.data.planCode,
+      userId: req.user.id,
       userEmail: req.user.email,
+      userName: req.user.name ?? undefined,
     });
 
-    res.json({ success: true, data: { checkoutUrl } });
+    res.json({ success: true, data: { checkoutUrl, mode } });
   } catch (err) {
     next(err);
   }

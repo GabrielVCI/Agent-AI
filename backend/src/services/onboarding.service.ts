@@ -41,15 +41,20 @@ export async function completeOnboarding(user: AuthenticatedUser, data: Onboardi
     return { tenant, tenantCreated: false };
   }
 
-  // Self-service: crear empresa, asociar como OWNER y abrir trial con el plan base.
-  const basePlan = await prisma.plan.findFirst({
-    where: { isActive: true },
-    orderBy: { priceMonthly: "asc" },
-  });
-
+  // Self-service: crear empresa y asociar como OWNER. No se crea suscripción
+  // aquí: el tenant entra al flujo comercial (verificación → implementación →
+  // activación final por SUPER_ADMIN). Los planes manuales siguen siendo
+  // territorio del SUPER_ADMIN (admin panel).
   const now = new Date();
-  const trialEnd = new Date(now);
-  trialEnd.setDate(trialEnd.getDate() + 14);
+
+  // El lifecycle inicial depende de si el OWNER ya verificó su correo
+  // (p. ej. registro con Google): verificado → IMPLEMENTATION_PENDING;
+  // pendiente → EMAIL_PENDING (la verificación hará la transición).
+  const dbUser = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { emailVerifiedAt: true },
+  });
+  const emailVerifiedAt = dbUser?.emailVerifiedAt ?? null;
 
   const tenant = await prisma.$transaction(async (tx) => {
     const created = await tx.tenant.create({
@@ -59,6 +64,8 @@ export async function completeOnboarding(user: AuthenticatedUser, data: Onboardi
         status: "ACTIVE",
         onboarding: onboardingJson,
         onboardingCompletedAt: now,
+        lifecycleStatus: emailVerifiedAt ? "IMPLEMENTATION_PENDING" : "EMAIL_PENDING",
+        emailVerifiedAt,
       },
     });
 
@@ -66,18 +73,6 @@ export async function completeOnboarding(user: AuthenticatedUser, data: Onboardi
       where: { id: user.id },
       data: { tenantId: created.id, role: "OWNER" },
     });
-
-    if (basePlan) {
-      await tx.subscription.create({
-        data: {
-          tenantId: created.id,
-          planId: basePlan.id,
-          status: "TRIALING",
-          currentPeriodStart: now,
-          currentPeriodEnd: trialEnd,
-        },
-      });
-    }
 
     return created;
   });

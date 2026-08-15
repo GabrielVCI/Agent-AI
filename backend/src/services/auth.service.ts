@@ -3,7 +3,9 @@ import { prisma } from "../config/prisma.js";
 import { getRedisClient } from "../config/redis.js";
 import { env } from "../config/env.js";
 import { generateToken, hashToken } from "../lib/crypto.js";
+import { logger } from "../config/logger.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { issueVerificationEmail } from "./email-verification.service.js";
 import type { AuthenticatedUser, SessionCachePayload } from "../types/auth.types.js";
 
 const SESSION_PREFIX = "session:";
@@ -95,8 +97,13 @@ export async function loginUser(
 ): Promise<{ token: string; user: AuthenticatedUser }> {
   const user = await prisma.user.findUnique({ where: { email } });
 
+  // Mensaje idéntico para "no existe", "deshabilitado" y "password mal":
+  // no revelamos cuál fue (enumeración de usuarios).
   if (!user || user.status === "DISABLED") {
-    throw new AppError("Credenciales inválidas", 401);
+    throw new AppError("Usuario o clave incorrecta.", 401, {
+      code: "INVALID_CREDENTIALS",
+      internalMessage: !user ? "login: email no registrado" : "login: usuario DISABLED",
+    });
   }
 
   if (!user.passwordHash) {
@@ -108,7 +115,10 @@ export async function loginUser(
 
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) {
-    throw new AppError("Credenciales inválidas", 401);
+    throw new AppError("Usuario o clave incorrecta.", 401, {
+      code: "INVALID_CREDENTIALS",
+      internalMessage: "login: password incorrecto",
+    });
   }
 
   return createSessionForUser(user, meta);
@@ -117,7 +127,7 @@ export async function loginUser(
 export async function registerUser(
   input: { name: string; lastName: string; email: string; password: string },
   meta: { userAgent?: string; ipAddress?: string }
-): Promise<{ token: string; user: AuthenticatedUser }> {
+): Promise<{ token: string; user: AuthenticatedUser; verificationEmailSent: boolean }> {
   const email = input.email.toLowerCase().trim();
 
   const existing = await prisma.user.findUnique({ where: { email } });
@@ -128,6 +138,7 @@ export async function registerUser(
   const passwordHash = await hashPassword(input.password);
 
   // Sin tenant al registrarse: el onboarding crea la empresa y lo asocia como OWNER.
+  // emailVerifiedAt queda null: el flujo comercial exige verificar el correo.
   const user = await prisma.user.create({
     data: {
       name: input.name.trim(),
@@ -140,7 +151,19 @@ export async function registerUser(
     },
   });
 
-  return createSessionForUser(user, meta);
+  // Correo de bienvenida + verificación. NUNCA rompe el registro: la cuenta ya
+  // existe y el usuario puede pedir el reenvío desde la pantalla de verificación
+  // (hacer rollback de un registro válido por un fallo de correo sería peor).
+  let verificationEmailSent = false;
+  try {
+    const result = await issueVerificationEmail(user);
+    verificationEmailSent = result.sent;
+  } catch (err) {
+    logger.error(`[REGISTER] no se pudo emitir el correo de verificación: ${String(err)}`);
+  }
+
+  const session = await createSessionForUser(user, meta);
+  return { ...session, verificationEmailSent };
 }
 
 /** Login/creación de cuenta a partir de un perfil de Google verificado (server-side). */
@@ -161,12 +184,17 @@ export async function loginWithGoogleProfile(
   let user = await prisma.user.findUnique({ where: { googleId: profile.googleId } });
 
   if (!user) {
-    // Vincular por email si ya existe una cuenta local con ese correo
+    // Vincular por email si ya existe una cuenta local con ese correo.
+    // Google ya verificó el correo (email_verified true, validado arriba):
+    // se marca emailVerifiedAt sin exigir el flujo de verificación propio.
     const byEmail = await prisma.user.findUnique({ where: { email: profile.email } });
     if (byEmail) {
       user = await prisma.user.update({
         where: { id: byEmail.id },
-        data: { googleId: profile.googleId },
+        data: {
+          googleId: profile.googleId,
+          ...(byEmail.emailVerifiedAt ? {} : { emailVerifiedAt: new Date() }),
+        },
       });
     } else {
       user = await prisma.user.create({
@@ -179,9 +207,16 @@ export async function loginWithGoogleProfile(
           role: "OWNER",
           status: "ACTIVE",
           authProvider: "GOOGLE",
+          emailVerifiedAt: new Date(),
         },
       });
     }
+  } else if (!user.emailVerifiedAt) {
+    // Cuenta Google existente sin marca (creada antes de la feature)
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerifiedAt: new Date() },
+    });
   }
 
   if (user.status === "DISABLED") {

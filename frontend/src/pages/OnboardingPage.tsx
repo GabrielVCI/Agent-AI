@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { ArrowLeft, ArrowRight, Building2, MessageSquare, Target } from 'lucide-react'
 import { SendwaryLogo } from '../components/BrandLogo'
 import { useAuth } from '../contexts/AuthContext'
@@ -117,6 +117,11 @@ export default function OnboardingPage() {
   const [step, setStep] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  // Flujo comercial: primero verificar el correo, después crear la empresa
+  if (user && user.emailVerified === false) {
+    return <Navigate to="/verificar-correo" replace />
+  }
 
   const [form, setForm] = useState<FormData>({
     businessName: '',

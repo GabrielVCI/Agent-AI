@@ -139,6 +139,7 @@ export async function listTicketsController(req: Request, res: Response, next: N
       status: req.query.status as string | undefined,
       tier: req.query.tier as string | undefined,
       severity: req.query.severity as string | undefined,
+      search: typeof req.query.search === "string" ? req.query.search.slice(0, 120) : undefined,
     });
     res.json({ success: true, data: tickets });
   } catch (err) {

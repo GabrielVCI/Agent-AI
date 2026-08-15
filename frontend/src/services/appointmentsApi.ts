@@ -1,4 +1,5 @@
 import api from '../lib/api'
+import { normalizePaginatedResponse, type PagedResult } from '../lib/pagination'
 
 // ─── Tipos (espejo del contrato /api/appointments del backend) ───────────────
 
@@ -58,6 +59,12 @@ export interface AppointmentFilters {
   status?: AppointmentStatus
   priority?: AppointmentPriority
   search?: string
+  agentId?: string
+  source?: AppointmentSource
+  page?: number
+  limit?: number
+  sortBy?: 'scheduledAt' | 'requestedAt' | 'createdAt'
+  sortOrder?: 'asc' | 'desc'
 }
 
 export interface TimeRange {
@@ -96,8 +103,15 @@ export interface RemindersResult {
 }
 
 export const appointmentsApi = {
-  list: (filters: AppointmentFilters = {}) =>
-    api.get<Appointment[]>('/api/appointments', filters as Record<string, string | undefined>),
+  // Contrato paginado: { items, total, page, limit, pages, filters }.
+  // normalizePaginatedResponse tolera también la forma legacy (array directo).
+  list: async (filters: AppointmentFilters = {}): Promise<PagedResult<Appointment>> => {
+    const data = await api.get<unknown>(
+      '/api/appointments',
+      filters as Record<string, string | number | undefined>
+    )
+    return normalizePaginatedResponse<Appointment>(data)
+  },
 
   create: (data: AppointmentInput) => api.post<Appointment>('/api/appointments', data),
 

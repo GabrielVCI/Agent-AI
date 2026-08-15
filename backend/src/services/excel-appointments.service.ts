@@ -86,7 +86,13 @@ export async function exportAppointmentsToExcel(
   tenantId: string,
   filters: { search?: string; status?: string; priority?: string; dateFrom?: string; dateTo?: string }
 ): Promise<Buffer> {
-  const appointments = await listAppointments(tenantId, filters as Parameters<typeof listAppointments>[1]);
+  // Export completo: sin default de 30 días y sin paginación (hasta 10k filas)
+  const { items: appointments } = await listAppointments(tenantId, {
+    ...filters,
+    applyDefaultRange: false,
+    page: 1,
+    limit: 10_000,
+  } as Parameters<typeof listAppointments>[1]);
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Sendwary";

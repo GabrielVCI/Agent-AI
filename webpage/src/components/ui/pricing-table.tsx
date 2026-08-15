@@ -1,13 +1,15 @@
 import * as React from 'react'
-import { Check, Sparkles } from 'lucide-react'
+import { Check, Sparkles, Percent } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { type PlanLevel } from '@/lib/waitlist'
+import { WaitlistModal } from '@/components/waitlist/WaitlistModal'
 
 /* -------------------------------------------------------------------------- */
 /*  Datos de planes (fuente única, reutilizada en cards y comparación).        */
 /* -------------------------------------------------------------------------- */
 
 export interface Plan {
-  id: 'basico' | 'pro' | 'enterprise'
+  id: PlanLevel
   name: string
   monthly: number
   annual: number
@@ -44,7 +46,7 @@ export const PLANS: Plan[] = [
       'Soporte básico',
     ],
     messages: 'Rango estimado: 1,500 a 3,000 mensajes mensuales.',
-    cta: 'Empezar con Básico',
+    cta: 'Empieza Gratis',
   },
   {
     id: 'pro',
@@ -66,7 +68,7 @@ export const PLANS: Plan[] = [
       'Soporte prioritario',
     ],
     messages: 'Rango estimado: 3,000 a 6,000 mensajes mensuales.',
-    cta: 'Elegir Pro',
+    cta: 'Empieza Gratis',
     popular: true,
   },
   {
@@ -77,7 +79,7 @@ export const PLANS: Plan[] = [
     setup: 600,
     setupFrom: true,
     description:
-      'Para negocios con operaciones más complejas, mayor volumen o necesidad de integraciones.',
+      'Para negocios con operaciones más complejas, mayor volumen o necesidad de integraciones. Todo desde un solo lugar.',
     features: [
       'Todo lo del plan Pro',
       'Hasta 10 usuarios',
@@ -138,7 +140,15 @@ function BillingToggle({
 /*  Card de plan                                                               */
 /* -------------------------------------------------------------------------- */
 
-function PlanCard({ plan, billing }: { plan: Plan; billing: Billing }) {
+function PlanCard({
+  plan,
+  billing,
+  onJoinWaitlist,
+}: {
+  plan: Plan
+  billing: Billing
+  onJoinWaitlist: (plan: PlanLevel) => void
+}) {
   const price = billing === 'mensual' ? plan.monthly : plan.annual
   const period = billing === 'mensual' ? '/mes' : '/año'
   const perMonth = (plan.annual / 12).toFixed(plan.annual / 12 % 1 === 0 ? 0 : 1)
@@ -178,12 +188,23 @@ function PlanCard({ plan, billing }: { plan: Plan; billing: Billing }) {
         <span className="text-neutral-400 dark:text-neutral-500">(pago único)</span>
       </p>
 
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-brand-600 to-fuchsia-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm shadow-brand-600/25">
+          <Percent className="h-3 w-3" strokeWidth={3} />
+          20% OFF implementación
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+        Disponible para clientes registrados en la lista de espera.
+      </p>
+
       <p className="mt-4 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
         {plan.description}
       </p>
 
-      <a
-        href={`/contacto?plan=${plan.id}`}
+      <button
+        type="button"
+        onClick={() => onJoinWaitlist(plan.id)}
         className={cn(
           'mt-6 inline-flex w-full items-center justify-center rounded-xl px-5 py-3 text-sm font-semibold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-neutral-950',
           plan.popular
@@ -191,8 +212,8 @@ function PlanCard({ plan, billing }: { plan: Plan; billing: Billing }) {
             : 'border border-neutral-300 bg-white text-neutral-800 hover:bg-neutral-100 dark:border-white/10 dark:bg-white/5 dark:text-neutral-100 dark:hover:bg-white/10',
         )}
       >
-        {plan.cta}
-      </a>
+        Unirme a la lista - {plan.name}
+      </button>
 
       <div className="mt-7 border-t border-neutral-200/70 pt-6 dark:border-white/10">
         <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
@@ -222,6 +243,13 @@ function PlanCard({ plan, billing }: { plan: Plan; billing: Billing }) {
 
 export function PricingTable() {
   const [billing, setBilling] = React.useState<Billing>('mensual')
+  const [selectedPlan, setSelectedPlan] = React.useState<PlanLevel | null>(null)
+  const [waitlistOpen, setWaitlistOpen] = React.useState(false)
+
+  function handleJoinWaitlist(plan: PlanLevel) {
+    setSelectedPlan(plan)
+    setWaitlistOpen(true)
+  }
 
   return (
     <div>
@@ -231,9 +259,11 @@ export function PricingTable() {
 
       <div className="mt-12 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
         {PLANS.map((plan) => (
-          <PlanCard key={plan.id} plan={plan} billing={billing} />
+          <PlanCard key={plan.id} plan={plan} billing={billing} onJoinWaitlist={handleJoinWaitlist} />
         ))}
       </div>
+
+      <WaitlistModal open={waitlistOpen} onOpenChange={setWaitlistOpen} selectedPlan={selectedPlan} />
     </div>
   )
 }

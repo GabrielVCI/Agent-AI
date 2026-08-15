@@ -86,10 +86,11 @@
 //   )
 // }
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AdminTenant, CancellationRequest } from '../../types'
 import api from '../../lib/api'
+import { useAutoRefresh } from '../../hooks/useAutoRefresh'
 import { StatCard } from '../../components/ui/Card'
 import Badge from '../../components/ui/Badge'
 import LoadingSpinner from '../../components/ui/LoadingSpinner'
@@ -279,50 +280,42 @@ export default function AdminOverviewPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  // silent=true: refresco de fondo sin spinner y conservando datos si falla
+  const loadAdminData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
 
-    async function loadAdminData() {
-      setLoading(true)
+    const [tenantsResult, cancellationsResult] = await Promise.allSettled([
+      api.get<AdminTenantsApiResponse | AdminTenant[]>('/api/admin/tenants'),
+      api.get<AdminCancellationRequestsApiResponse | CancellationRequest[]>(
+        '/api/admin/cancellation-requests'
+      ),
+    ])
+
+    if (tenantsResult.status === 'fulfilled') {
+      setTenants(toArray(tenantsResult.value).map(normalizeTenant))
       setError(null)
-
-      const [tenantsResult, cancellationsResult] = await Promise.allSettled([
-        api.get<AdminTenantsApiResponse | AdminTenant[]>('/api/admin/tenants'),
-        api.get<AdminCancellationRequestsApiResponse | CancellationRequest[]>(
-          '/api/admin/cancellation-requests'
-        ),
-      ])
-
-      if (cancelled) return
-
-      if (tenantsResult.status === 'fulfilled') {
-        const normalizedTenants = toArray(tenantsResult.value).map(normalizeTenant)
-        setTenants(normalizedTenants)
-      } else {
-        console.error('Error cargando clientes admin:', tenantsResult.reason)
-        setTenants([])
-        setError('No se pudieron cargar los clientes.')
-      }
-
-      if (cancellationsResult.status === 'fulfilled') {
-        const normalizedCancellations = toArray(cancellationsResult.value).map(
-          normalizeCancellation
-        )
-        setCancellations(normalizedCancellations)
-      } else {
-        console.error('Error cargando cancelaciones admin:', cancellationsResult.reason)
-        setCancellations([])
-      }
-
-      setLoading(false)
+    } else if (!silent) {
+      console.error('Error cargando clientes admin:', tenantsResult.reason)
+      setTenants([])
+      setError('No se pudieron cargar los clientes.')
     }
 
-    loadAdminData()
-
-    return () => {
-      cancelled = true
+    if (cancellationsResult.status === 'fulfilled') {
+      setCancellations(toArray(cancellationsResult.value).map(normalizeCancellation))
+    } else if (!silent) {
+      console.error('Error cargando cancelaciones admin:', cancellationsResult.reason)
+      setCancellations([])
     }
+
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    loadAdminData()
+  }, [loadAdminData])
+
+  // Vista admin casi en tiempo real (Parte A: cada 60s, agregados globales)
+  useAutoRefresh(() => loadAdminData(true), 60_000)
 
   if (loading) {
     return (

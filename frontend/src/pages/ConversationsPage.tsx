@@ -123,22 +123,38 @@ export default function ConversationsPage() {
     clog('loading conversations')
     if (!silent) setLoading(true)
     try {
+      // TODOS los filtros van al backend (fase de listados): el search busca
+      // en todo el inbox del tenant, no solo sobre la página cargada.
       const data = await listConversations({
         agentId: agentFilter || undefined,
         labelId: labelFilter || undefined,
+        search: search.trim() || undefined,
         awaiting: filter === 'AWAITING' || undefined,
         pendingHuman: filter === 'NEEDS_HUMAN' || undefined,
         assignedToMe: filter === 'MINE' || undefined,
         unassigned: filter === 'UNASSIGNED' || undefined,
-        status: filter === 'BOT_ACTIVE' ? 'BOT_ACTIVE' : filter === 'CLOSED' ? 'CLOSED' : undefined,
+        withQuote: filter === 'WITH_QUOTE' || undefined,
+        status:
+          filter === 'BOT_ACTIVE'
+            ? 'BOT_ACTIVE'
+            : filter === 'HUMAN_ACTIVE'
+              ? 'HUMAN_ACTIVE'
+              : filter === 'CLOSED'
+                ? 'CLOSED'
+                : undefined,
+        limit: 100,
       })
       setConversations(data)
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [agentFilter, labelFilter, filter])
+  }, [agentFilter, labelFilter, filter, search])
 
-  useEffect(() => { loadConversations() }, [loadConversations])
+  useEffect(() => {
+    // Debounce del search (300ms); tabs y selects cargan de inmediato
+    const t = window.setTimeout(() => loadConversations(), search ? 300 : 0)
+    return () => window.clearTimeout(t)
+  }, [loadConversations, search])
 
   // Inbox casi en tiempo real (Parte I): lista cada 10s y, si hay un hilo
   // abierto, sus mensajes; solo se re-renderiza si llegó algo nuevo.
@@ -170,20 +186,10 @@ export default function ConversationsPage() {
   }, [loadLabels])
 
   useEffect(() => {
-    let list = conversations
-    // Los filtros `server` ya llegan filtrados del backend; aquí solo los locales
-    if (filter === 'WITH_QUOTE') list = list.filter(c => c.hasQuote)
-    else if (filter === 'HUMAN_ACTIVE') list = list.filter(c => c.status === 'HUMAN_ACTIVE')
-    if (search) {
-      const q = search.toLowerCase()
-      list = list.filter(c =>
-        c.contactPhone.includes(q) ||
-        (c.contactName?.toLowerCase().includes(q)) ||
-        (c.lastMessage?.toLowerCase().includes(q))
-      )
-    }
-    setFiltered(list)
-  }, [conversations, filter, search])
+    // Todos los filtros (tabs, search, etiquetas) ya se aplican en el backend:
+    // la lista llega filtrada y no se re-filtra en el cliente.
+    setFiltered(conversations)
+  }, [conversations])
 
   const selectConversation = async (conv: Conversation) => {
     clog('selected conversation', conv.id)

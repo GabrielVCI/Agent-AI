@@ -22,6 +22,21 @@ enum TenantStatus {
   CANCELLED
 }
 
+// Estado COMERCIAL del tenant (registro → verificación → implementación →
+// activación final). Independiente de TenantStatus (operativo): un tenant
+// legado queda ACTIVE y conserva el comportamiento actual del paywall.
+enum TenantLifecycleStatus {
+  REGISTERED
+  EMAIL_PENDING
+  EMAIL_VERIFIED
+  IMPLEMENTATION_PENDING
+  IMPLEMENTATION_IN_PROGRESS
+  IMPLEMENTATION_COMPLETED
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
 enum UserRole {
   SUPER_ADMIN
   OWNER
@@ -76,6 +91,22 @@ enum SubscriptionStatus {
   CANCELLED
   TRIALING
   EXPIRED
+}
+
+// Webhook de billing que NO se pudo asociar a ningún tenant (sin custom_data
+// y sin match por email de owner). Queda para revisión manual del SUPER_ADMIN:
+// NUNCA se activa un tenant "adivinando".
+model UnmatchedBillingWebhook {
+  id                         String    @id @default(cuid())
+  provider                   String    @default("LEMONSQUEEZY")
+  eventName                  String
+  lemonSqueezySubscriptionId String?
+  customerEmail              String?
+  payloadJson                Json
+  createdAt                  DateTime  @default(now())
+  resolvedAt                 DateTime?
+
+  @@index([createdAt])
 }
 
 enum CancellationStatus {
@@ -201,6 +232,64 @@ enum IntegrationStatus {
   ERROR
 }
 
+// Proveedor técnico que transporta los mensajes. META_CLOUD es el único
+// implementado hoy; los BSP quedan declarados para que la abstracción de
+// providers (services/whatsapp-providers/) pueda enrutarlos sin migración.
+enum WhatsAppProvider {
+  META_CLOUD
+  TWILIO
+  DIALOG360
+  INFOBIP
+  EIGHTX8
+  SENDWARY_DEMO
+  OTHER
+}
+
+// CÓMO conectó el tenant su WhatsApp (independiente del proveedor):
+// - EASY_ONBOARDING: conexión guiada (Embedded Signup/BSP o asistida por el
+//   equipo Sendwary mientras esa vía no esté aprobada).
+// - MANUAL_CLOUD_API: el cliente ya tiene su app de Meta y pega credenciales.
+// - DEMO_SANDBOX: número controlado por Sendwary, solo para pruebas.
+enum WhatsAppConnectionMode {
+  EASY_ONBOARDING
+  MANUAL_CLOUD_API
+  DEMO_SANDBOX
+}
+
+// Situación REAL del número del cliente frente a WhatsApp Business Platform.
+// Es distinto del estado de la integración: un número puede estar declarado y
+// evaluado (PERSONAL_WHATSAPP) mucho antes de existir una conexión técnica.
+enum WhatsAppNumberReadiness {
+  UNKNOWN
+  PERSONAL_WHATSAPP // hoy en WhatsApp normal: no se conecta "solo escribiéndolo"
+  WHATSAPP_BUSINESS_APP // en la app WhatsApp Business: candidato, requiere flujo oficial
+  CLOUD_API_READY // ya tiene Cloud API propio: puede ir a configuración avanzada
+  BSP_CONNECTED // está con un proveedor externo: evaluar migración
+  NEW_NUMBER_RECOMMENDED // lo más seguro y rápido: número dedicado nuevo
+  NEEDS_MIGRATION // hay que migrarlo desde donde está
+  NEEDS_ASSISTED_SETUP // el equipo Sendwary debe intervenir
+  CONNECTED // conectado y validado contra la API oficial
+  ERROR
+}
+
+// Seguimiento operativo de la preparación del número (lo mueve el equipo).
+enum WhatsAppReadinessStage {
+  PENDING // el cliente declaró su número, nadie lo ha revisado
+  IN_REVIEW // el equipo lo está evaluando
+  READY_TO_CONNECT // listo para Embedded Signup / conexión
+  CONNECTED
+  REQUIRES_CUSTOMER_ACTION // esperando algo del cliente
+}
+
+enum WhatsAppIntegrationStatus {
+  DRAFT // guardada pero aún no validada contra Meta
+  CONNECTING // conexión en curso (asistida por Sendwary o Embedded Signup)
+  CONNECTED // validada: token y phoneNumberId funcionan
+  REQUIRES_ACTION // falta algo del cliente (número, verificación, datos)
+  ERROR // última validación falló (ver lastValidationError)
+  DISABLED // apagada por el tenant o por un admin
+}
+
 enum MetricType {
   CONVERSATION
   MESSAGE
@@ -243,6 +332,27 @@ model Tenant {
   // Config de llamadas IA: { enabled, minutesPerUser, monthlyMinutesLimit,
   // allowedAgentIds, businessPhoneNumbers } — ver voice.service.ts
   voiceSettings Json?
+
+  // ── Flujo comercial (verificación → implementación → activación final) ──
+  // Default ACTIVE: los tenants existentes no cambian de comportamiento; los
+  // self-service nuevos se crean con el estado que corresponda en onboarding.
+  lifecycleStatus TenantLifecycleStatus @default(ACTIVE)
+  // Cuando el OWNER verificó su correo (espejo informativo de User.emailVerifiedAt)
+  emailVerifiedAt DateTime?
+  // Pago de implementación registrado por SUPER_ADMIN
+  implementationFeePaidAt DateTime?
+  implementationStartedAt DateTime?
+  implementationExpectedEndAt DateTime?
+  // Activación final fijada por SUPER_ADMIN: desde aquí corre el primer mes
+  finalActivationDate DateTime?
+  // Siempre = finalActivationDate + 1 mes (recalculado al cambiar la fecha)
+  firstMonthEndsAt DateTime?
+  // Bypass temporal del paywall autorizado por SUPER_ADMIN
+  paywallBypassUntil  DateTime?
+  paywallBypassReason String?
+  // Notas técnicas del equipo de implementación (nunca visibles para el cliente)
+  internalImplementationNotes String?
+
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
@@ -255,6 +365,7 @@ model Tenant {
   subscription         Subscription?
   cancellationRequests CancellationRequest[]
   integrations         Integration[]
+  whatsappIntegrations WhatsAppIntegration[]
   knowledgeDocuments   KnowledgeDocument[]
   usageMetrics         UsageMetric[]
   idempotencyKeys      IdempotencyKey[]
@@ -280,6 +391,11 @@ model User {
   role         UserRole
   status       UserStatus @default(ACTIVE)
   lastLoginAt  DateTime?
+  // Verificación de correo: null = pendiente. Usuarios creados por SUPER_ADMIN
+  // o vía Google (email_verified) nacen verificados; los existentes se
+  // backfillean para no bloquear a nadie.
+  emailVerifiedAt         DateTime?
+  emailVerificationSentAt DateTime?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -289,6 +405,7 @@ model User {
   cancellationRequests  CancellationRequest[]
   callLogs              CallLog[]
   passwordResetTokens   PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
 
   @@index([tenantId])
   @@index([email])
@@ -300,6 +417,24 @@ model User {
 model PasswordResetToken {
   id        String    @id @default(cuid())
   userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Tokens de verificación de correo (mismo patrón que PasswordResetToken):
+// solo se guarda el hash sha256, expiran (48h) y son de un solo uso (usedAt).
+// El token plano viaja únicamente en el link del correo de bienvenida.
+model EmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tenantId  String?
   tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
@@ -392,8 +527,14 @@ model Subscription {
   lemonSqueezyCustomerId     String?
   lemonSqueezySubscriptionId String?   @unique
   lemonSqueezyOrderId        String?
+  lemonSqueezyVariantId      String?
+  lemonSqueezyProductId      String?
   renewsAt                   DateTime?
   endsAt                     DateTime?
+  // Último webhook de billing procesado para esta suscripción (auditoría admin)
+  lastWebhookAt              DateTime?
+  // Último evento crudo relevante (event_name, test_mode, status LS...)
+  metadataJson               Json?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -801,6 +942,106 @@ model Integration {
 
   @@index([tenantId])
   @@index([type])
+}
+
+// Conexión de WhatsApp Business Cloud API POR TENANT (cada cliente usa su
+// propia app/token de Meta; el token global del .env queda solo como fallback
+// de demo controlado). Separado del modelo Integration genérico porque el
+// webhook necesita lookup único e indexado por phoneNumberId y campos
+// consultables (verifyToken, estado de validación) que un JSON cifrado no da.
+model WhatsAppIntegration {
+  id       String                    @id @default(cuid())
+  tenantId String
+  provider WhatsAppProvider          @default(META_CLOUD)
+  // Default MANUAL_CLOUD_API: las integraciones existentes se crearon así.
+  mode     WhatsAppConnectionMode    @default(MANUAL_CLOUD_API)
+  status   WhatsAppIntegrationStatus @default(DRAFT)
+
+  businessName String?
+  // DEPRECADO: nombre histórico del WABA ID. Se sigue escribiendo en sincronía
+  // con `wabaId` para no romper la config manual ya guardada; leer `wabaId`.
+  businessAccountId String?
+  // WABA ID (WhatsApp Business Account) — lo devuelve Embedded Signup.
+  wabaId String?
+  // Meta Business ID (la empresa dueña de la WABA). Distinto del WABA ID;
+  // lo devuelve Embedded Signup y lo piden los BSP.
+  businessId String?
+  // Nullable desde el modo guiado: una solicitud de conexión asistida existe
+  // ANTES de que haya número. Sigue siendo único global (Postgres permite
+  // múltiples NULL), así que el lookup del webhook no cambia.
+  phoneNumberId      String? @unique // el mismo ID que se asigna a Agent.whatsappPhoneNumberId
+  displayPhoneNumber String?
+  graphApiVersion    String  @default("v20.0")
+
+  // Verify token propio del tenant para el GET de verificación del webhook.
+  // Se genera automáticamente; el webhook acepta este O el global (compat).
+  verifyToken String @unique
+
+  // Access token de Meta cifrado con AES-256-GCM (lib/crypto.ts encryptJson).
+  // NUNCA se devuelve al frontend; solo se expone tokenLastFour.
+  accessTokenEncrypted String?
+  tokenLastFour        String?
+  tokenExpiresAt       DateTime?
+
+  webhookUrl          String?
+  webhookVerifiedAt   DateTime?
+  lastValidationAt    DateTime?
+  lastValidationError String?
+
+  // ── Embedded Signup (flujo oficial de Meta) ──
+  // El `code` de Meta NO se persiste: vive 30 segundos y es una credencial de
+  // un solo uso; se intercambia en el acto y se descarta.
+  embeddedSignupCompletedAt DateTime?
+  // Cuándo se suscribió la app a los webhooks de la WABA del cliente
+  webhookSubscribedAt DateTime?
+  // Último resultado del health check (para el panel admin sin re-consultar Meta)
+  lastHealthStatus String?
+
+  // ── Preparación del número (wizard "Preparar número") ──
+  // Campos consultables (no JSON) porque el panel admin filtra y ordena por
+  // ellos: "qué clientes necesitan número nuevo", "cuáles esperan revisión".
+  numberReadiness WhatsAppNumberReadiness @default(UNKNOWN)
+  readinessStage  WhatsAppReadinessStage?
+  // Opción que eligió el cliente en el wizard (PERSONAL, BUSINESS_APP, ...)
+  declaredNumberType String?
+  // Número que el cliente DICE querer usar. Solo lo ve el equipo; al ticket
+  // de soporte va enmascarado.
+  declaredPhoneNumber String?
+  // Proveedor/BSP donde está hoy el número, si aplica (texto libre)
+  currentProvider String?
+  // Recomendación que el sistema le dio (para que soporte vea lo mismo que él)
+  readinessRecommendation String?
+  // Comentarios del cliente en el wizard
+  readinessNotes     String?
+  readinessUpdatedAt DateTime?
+
+  // ── Conexión asistida por el equipo Sendwary (modo EASY_ONBOARDING) ──
+  // Campos consultables (no JSON) porque el panel admin filtra y ordena por
+  // ellos: "quién pidió ayuda y desde cuándo".
+  assistedSetupRequestedAt     DateTime?
+  assistedSetupRequestedByUserId String?
+  assistedSetupStartedAt       DateTime?
+  // Notas internas del equipo Sendwary (el tenant NUNCA las ve)
+  adminNotes String?
+
+  // ── Modo demo (número de Sendwary, solo pruebas) ──
+  demoMessagesUsed Int @default(0)
+
+  // Datos libres del proveedor/onboarding (respuesta de Embedded Signup,
+  // checklist de requisitos, IDs del BSP). Nunca contiene tokens.
+  metadataJson Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([mode])
+  @@index([assistedSetupRequestedAt])
+  @@index([numberReadiness])
+  @@index([readinessStage])
 }
 
 model IdempotencyKey {

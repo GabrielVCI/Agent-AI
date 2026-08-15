@@ -4,10 +4,16 @@ import { Footer } from '@/components/layout/Footer'
 import { SectionBadge } from '@/components/ui/page-sections'
 import { ContactForm } from '@/components/contact/ContactForm'
 import { ContactInfoPanel } from '@/components/contact/ContactInfoPanel'
+import { SEOHead } from '@/components/seo/SEOHead'
 
 export default function ContactoPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Contacto Sendwary | Solicita una demo"
+        description="Solicita una demo de Sendwary y descubre cómo automatizar la atención, solicitudes, cotizaciones, citas e integraciones de tu negocio con agentes IA."
+        path="/contacto"
+      />
       <Navbar />
       <main>
         {/* Hero interno */}

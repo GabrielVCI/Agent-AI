@@ -340,6 +340,7 @@ export default function AdminSupportPage() {
   const [filterStatus, setFilterStatus] = useState('')
   const [filterTier, setFilterTier] = useState('')
   const [filterSeverity, setFilterSeverity] = useState('')
+  const [searchTickets, setSearchTickets] = useState('')
   const [selected, setSelected] = useState<SupportTicket | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [newTitle, setNewTitle] = useState('')
@@ -355,6 +356,7 @@ export default function AdminSupportPage() {
         status: filterStatus || undefined,
         tier: filterTier || undefined,
         severity: filterSeverity || undefined,
+        search: searchTickets.trim() || undefined,
       })
       setTickets(Array.isArray(data) ? data : [])
     } catch (err: unknown) {
@@ -363,9 +365,13 @@ export default function AdminSupportPage() {
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [filterStatus, filterTier, filterSeverity])
+  }, [filterStatus, filterTier, filterSeverity, searchTickets])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    // Debounce del search (300ms); los selects cargan de inmediato
+    const t = window.setTimeout(() => load(), searchTickets ? 300 : 0)
+    return () => window.clearTimeout(t)
+  }, [load, searchTickets])
   useAutoRefresh(() => load(true), 30_000)
 
   const createTicket = async (e: FormEvent) => {
@@ -427,8 +433,15 @@ export default function AdminSupportPage() {
 
       <TriagePanel onTicketCreated={() => load(true)} />
 
-      {/* Filtros */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      {/* Filtros (search + selects, todos server-side) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+        <input
+          type="text"
+          value={searchTickets}
+          onChange={e => setSearchTickets(e.target.value)}
+          placeholder="Buscar por título, descripción o categoría…"
+          className={inputClass}
+        />
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className={inputClass}>
           <option value="">Todos los estados</option>
           {Object.entries(statusMeta).map(([v, m]) => <option key={v} value={v}>{m.label}</option>)}

@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import * as catalog from "../services/catalog.service.js";
+import { invalidateDashboardCache } from "../services/dashboard.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 
 function tenantIdOf(req: Request): string {
@@ -111,10 +112,14 @@ const itemSchema = z.object({
 });
 
 const listQuerySchema = z.object({
-  search: z.string().optional(),
+  search: z.string().max(120).optional(),
   categoryId: z.string().optional(),
   type: z.enum(["PRODUCT", "SERVICE"]).optional(),
   status: z.enum(["active", "inactive"]).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  sortBy: z.enum(["name", "price", "createdAt"]).optional(),
+  sortOrder: z.enum(["asc", "desc"]).optional(),
 });
 
 export async function listItemsController(req: Request, res: Response, next: NextFunction) {
@@ -133,6 +138,7 @@ export async function createItemController(req: Request, res: Response, next: Ne
     const parsed = itemSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.flatten().fieldErrors);
     const item = await catalog.createItem(tenantIdOf(req), parsed.data);
+    void invalidateDashboardCache(tenantIdOf(req));
     res.status(201).json({ success: true, data: item });
   } catch (err) {
     next(err);
@@ -153,6 +159,7 @@ export async function updateItemController(req: Request, res: Response, next: Ne
     const parsed = itemSchema.partial().safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.flatten().fieldErrors);
     const item = await catalog.updateItem(tenantIdOf(req), req.params.id, parsed.data);
+    void invalidateDashboardCache(tenantIdOf(req));
     res.json({ success: true, data: item });
   } catch (err) {
     next(err);
@@ -164,6 +171,7 @@ export async function itemStatusController(req: Request, res: Response, next: Ne
     const parsed = statusSchema.safeParse(req.body);
     if (!parsed.success) return invalid(res, parsed.error.flatten().fieldErrors);
     const item = await catalog.setItemStatus(tenantIdOf(req), req.params.id, parsed.data.isActive);
+    void invalidateDashboardCache(tenantIdOf(req));
     res.json({ success: true, data: item });
   } catch (err) {
     next(err);
@@ -173,6 +181,7 @@ export async function itemStatusController(req: Request, res: Response, next: Ne
 export async function deleteItemController(req: Request, res: Response, next: NextFunction) {
   try {
     const result = await catalog.deleteItem(tenantIdOf(req), req.params.id);
+    void invalidateDashboardCache(tenantIdOf(req));
     res.json({ success: true, data: result, message: "Ítem eliminado" });
   } catch (err) {
     next(err);

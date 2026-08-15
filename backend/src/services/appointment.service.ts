@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { sendWhatsappTextMessage } from "./meta-whatsapp.service.js";
+import { resolveSendCredentials } from "./whatsapp-integration.service.js";
+import { invalidateDashboardCache } from "./dashboard.service.js";
 import { logger } from "../config/logger.js";
 
 // ─── Settings (nivel tenant, JSON en Tenant.appointmentSettings) ─────────────
@@ -130,6 +132,11 @@ async function logAppointmentEvent(input: {
   conversationId: string | null;
   text: string;
 }) {
+  // Toda mutación de citas pasa por aquí: el dashboard cuenta citas
+  // próximas/pendientes, así que invalidamos su cache SIEMPRE (también para
+  // citas manuales sin conversación).
+  void invalidateDashboardCache(input.tenantId);
+
   if (!input.conversationId) return;
   try {
     await prisma.$transaction([
@@ -187,20 +194,50 @@ export interface ListAppointmentsFilters {
   status?: string;
   priority?: string;
   search?: string;
+  agentId?: string;
+  source?: string;
+  page?: number;
+  limit?: number;
+  sortBy?: "scheduledAt" | "requestedAt" | "createdAt";
+  sortOrder?: "asc" | "desc";
+  /**
+   * Default: sin dateFrom/dateTo se aplican los ÚLTIMOS 30 DÍAS (regla de la
+   * fase de listados). El export a Excel y otros consumidores internos que
+   * necesitan TODO el histórico pasan false explícito.
+   */
+  applyDefaultRange?: boolean;
 }
+
+const APPOINTMENT_SORT_FIELDS = ["scheduledAt", "requestedAt", "createdAt"] as const;
+const APPOINTMENT_DEFAULT_RANGE_DAYS = 30;
 
 export async function listAppointments(tenantId: string, filters: ListAppointmentsFilters) {
   const where: Prisma.AppointmentWhereInput = { tenantId };
 
-  if (filters.dateFrom || filters.dateTo) {
+  // Default últimos 30 días: solo cuando el usuario NO indicó ninguna fecha
+  // y el caller no lo desactiva (el export a Excel pasa applyDefaultRange=false).
+  let dateFrom = filters.dateFrom;
+  let dateTo = filters.dateTo;
+  const defaultRangeApplied =
+    filters.applyDefaultRange !== false && !dateFrom && !dateTo;
+  if (defaultRangeApplied) {
+    const from = new Date();
+    from.setDate(from.getDate() - APPOINTMENT_DEFAULT_RANGE_DAYS);
+    dateFrom = from.toISOString().slice(0, 10);
+    dateTo = new Date().toISOString().slice(0, 10);
+  }
+
+  if (dateFrom || dateTo) {
     where.scheduledAt = {
-      ...(filters.dateFrom ? { gte: new Date(filters.dateFrom) } : {}),
-      ...(filters.dateTo ? { lte: new Date(`${filters.dateTo}T23:59:59.999`) } : {}),
+      ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+      ...(dateTo ? { lte: new Date(`${dateTo}T23:59:59.999`) } : {}),
     };
   }
   if (filters.status) where.status = filters.status as Prisma.AppointmentWhereInput["status"];
   if (filters.priority)
     where.priority = filters.priority as Prisma.AppointmentWhereInput["priority"];
+  if (filters.agentId) where.agentId = filters.agentId;
+  if (filters.source) where.source = filters.source as Prisma.AppointmentWhereInput["source"];
   if (filters.search) {
     where.OR = [
       { customerName: { contains: filters.search, mode: "insensitive" } },
@@ -209,13 +246,35 @@ export async function listAppointments(tenantId: string, filters: ListAppointmen
     ];
   }
 
-  const appointments = await prisma.appointment.findMany({
-    where,
-    include: appointmentInclude,
-    orderBy: { scheduledAt: "asc" },
-  });
+  const page = Math.max(1, filters.page ?? 1);
+  // El tope HTTP real es 100 (zod del controller); el margen extra es para
+  // consumidores internos como el export a Excel (limit 10k).
+  const limit = Math.min(Math.max(1, filters.limit ?? 20), 10_000);
+  const sortBy = APPOINTMENT_SORT_FIELDS.includes(filters.sortBy as never)
+    ? (filters.sortBy as (typeof APPOINTMENT_SORT_FIELDS)[number])
+    : "scheduledAt";
+  // Default desc: lo más reciente primero (vista "últimos 30 días")
+  const sortOrder = filters.sortOrder === "asc" ? "asc" : "desc";
 
-  return appointments.map(serializeAppointment);
+  const [rows, total] = await Promise.all([
+    prisma.appointment.findMany({
+      where,
+      include: appointmentInclude,
+      orderBy: { [sortBy]: sortOrder },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.appointment.count({ where }),
+  ]);
+
+  return {
+    items: rows.map(serializeAppointment),
+    total,
+    page,
+    limit,
+    pages: Math.max(1, Math.ceil(total / limit)),
+    filters: { dateFrom: dateFrom ?? null, dateTo: dateTo ?? null, defaultRangeApplied },
+  };
 }
 
 export interface AppointmentInput {
@@ -617,10 +676,15 @@ export async function processReminders(tenantId: string) {
     });
 
     try {
+      // Token del tenant si el número tiene integración propia (multi-tenant)
+      const credentials = appointment.agent?.whatsappPhoneNumberId
+        ? await resolveSendCredentials(appointment.agent.whatsappPhoneNumberId)
+        : null;
       await sendWhatsappTextMessage({
         to: appointment.customerPhone,
         text,
         phoneNumberId: appointment.agent?.whatsappPhoneNumberId ?? undefined,
+        credentials: credentials ?? undefined,
       });
       await prisma.appointment.update({
         where: { id: appointment.id },

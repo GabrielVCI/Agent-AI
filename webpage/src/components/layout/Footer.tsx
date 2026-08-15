@@ -10,7 +10,7 @@ import { SiWhatsapp } from 'react-icons/si'
 const BRAND_NAME = 'Sendwary'
 
 // Cambia estos valores cuando existan los datos reales del negocio.
-const CONTACT_EMAIL = 'contacto@tudominio.com'
+const CONTACT_EMAIL = 'info@sendwary.com'
 const WHATSAPP_URL = '#'
 const LINKEDIN_URL = '#'
 const INSTAGRAM_URL = '#'
@@ -131,7 +131,7 @@ export function Footer() {
           {/* Marca */}
           <div className="col-span-2 md:col-span-1">
             <Link to="/" className="inline-flex items-center" aria-label="Sendwary — inicio">
-              <img src="/logo.png" alt="Sendwary" className="h-9 w-auto object-contain sm:h-10" />
+              <img src="/logo-name.png" alt="Sendwary" className="h-9 w-auto object-contain sm:h-10" />
             </Link>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-neutral-400">
               Asistentes IA personalizados para negocios que atienden clientes por WhatsApp. Organiza

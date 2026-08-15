@@ -2,38 +2,79 @@
 <html lang="es" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#7c3aed" />
+    <meta name="robots" content="index, follow" />
 
-    <title>Sendwary | Agentes IA para WhatsApp Business</title>
+        <!-- Google Tag Manager -->
+    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','GTM-MZK8VD3K');</script>
+<!-- End Google Tag Manager -->
+    <title>Sendwary | Automatización inteligente para negocios</title>
     <meta
       name="description"
-      content="Automatiza la atención por WhatsApp con agentes IA, panel de conversaciones, cotizaciones, citas, audios, reportes e intervención humana para negocios."
+      content="Automatiza atención, solicitudes, cotizaciones, citas y seguimiento con agentes IA. Sendwary ayuda a negocios a responder más rápido sin perder control humano."
     />
+    <meta
+      name="keywords"
+      content="agentes IA para negocios, automatización de atención al cliente, inteligencia artificial para empresas, SaaS para negocios, cotizaciones con IA, citas con IA, atención automatizada, Sendwary, automatización para negocios"
+    />
+    <link rel="canonical" href="https://sendwary.com/" />
 
     <!-- Open Graph -->
-    <!-- TODO: reemplazar https://tudominio.com por el dominio real en producción. -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Sendwary" />
-    <meta property="og:title" content="Sendwary | Agentes IA para WhatsApp Business" />
+    <meta property="og:title" content="Sendwary | Automatización inteligente para negocios" />
     <meta
       property="og:description"
-      content="Automatiza la atención por WhatsApp con agentes IA, panel de conversaciones, cotizaciones, citas, audios, reportes e intervención humana para negocios."
+      content="Automatiza atención, solicitudes, cotizaciones, citas y seguimiento con agentes IA. Sendwary ayuda a negocios a responder más rápido sin perder control humano."
     />
-    <meta property="og:url" content="https://tudominio.com/" />
-    <!-- Conviene crear una imagen OG dedicada (1200x630). Se usa el logo temporalmente. -->
-    <meta property="og:image" content="https://tudominio.com/logo.png" />
+    <meta property="og:url" content="https://sendwary.com/" />
+    <meta property="og:image" content="https://sendwary.com/og-image.png" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Sendwary | Agentes IA para WhatsApp Business" />
+    <meta name="twitter:title" content="Sendwary | Automatización inteligente para negocios" />
     <meta
       name="twitter:description"
-      content="Automatiza la atención por WhatsApp con agentes IA, panel de conversaciones, cotizaciones, citas, audios, reportes e intervención humana para negocios."
+      content="Automatiza atención, solicitudes, cotizaciones, citas y seguimiento con agentes IA. Sendwary ayuda a negocios a responder más rápido sin perder control humano."
     />
-    <meta name="twitter:image" content="https://tudominio.com/logo.png" />
+    <meta name="twitter:image" content="https://sendwary.com/og-image.png" />
+
+    <!-- JSON-LD: WebSite + Organization (sitewide) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sendwary.com/#website",
+            "url": "https://sendwary.com/",
+            "name": "Sendwary",
+            "publisher": { "@id": "https://sendwary.com/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://sendwary.com/#organization",
+            "name": "Sendwary",
+            "url": "https://sendwary.com/",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://sendwary.com/logo.png"
+            },
+            "email": "info@sendwary.com"
+          }
+        ]
+      }
+    </script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -41,8 +82,22 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
+
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-NCENLH8H31"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-NCENLH8H31');
+    </script>
   </head>
   <body>
+    <!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-MZK8VD3K"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

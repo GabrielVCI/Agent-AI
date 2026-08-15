@@ -12,75 +12,41 @@ import { Card, CardHeader, StatCard } from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Alert from '../components/ui/Alert'
-import api from '../lib/api'
-import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { useDashboardStats } from '../hooks/data'
 import {
-  normalizeDashboardSummary,
-  normalizeDashboardByPhone,
-  normalizeAgentPerformance,
-  normalizeDashboardActivity,
-  normalizeDashboardQuotes,
-  normalizeDashboardAudio,
-  normalizeDashboardAlerts,
   formatInteger,
   formatNumber,
   formatPercent,
   formatTime,
-  DashboardSummaryView,
-  PhoneSummaryView,
-  AgentPerfView,
-  ActivityDayView,
-  QuotesView,
-  AudioView,
-  AlertView,
 } from '../lib/dashboard'
 
+/** "hace 12 s" / "hace 2 min" para el indicador de frescura. */
+function timeAgo(from: Date, now: Date): string {
+  const secs = Math.max(0, Math.round((now.getTime() - from.getTime()) / 1000))
+  if (secs < 60) return `hace ${secs} s`
+  return `hace ${Math.round(secs / 60)} min`
+}
+
 export default function DashboardPage() {
-  const [summary, setSummary] = useState<DashboardSummaryView | null>(null)
-  const [phones, setPhones] = useState<PhoneSummaryView[]>([])
-  const [agents, setAgents] = useState<AgentPerfView[]>([])
-  const [activity, setActivity] = useState<ActivityDayView[]>([])
-  const [quotes, setQuotes] = useState<QuotesView | null>(null)
-  const [audio, setAudio] = useState<AudioView | null>(null)
-  const [alerts, setAlerts] = useState<AlertView[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  // Datos en vivo: polling 30s (pausa con pestaña oculta), refetch fallido
+  // conserva los datos anteriores y marca staleWarning (aviso no intrusivo).
+  const { data, loading, refreshing, error, staleWarning, lastUpdatedAt, refreshFresh } =
+    useDashboardStats()
 
-  // silent=true refresca datos sin mostrar el spinner (polling de fondo)
-  const load = async (silent = false) => {
-    if (!silent) setLoading(true)
-    setError('')
-    // allSettled: un endpoint que falle (p.ej. 403) no rompe el resto del dashboard.
-    const [s, p, a, act, q, au, al] = await Promise.allSettled([
-      api.get<unknown>('/api/dashboard/summary'),
-      api.get<unknown>('/api/dashboard/by-phone'),
-      api.get<unknown>('/api/dashboard/agent-performance'),
-      api.get<unknown>('/api/dashboard/activity'),
-      api.get<unknown>('/api/dashboard/quotes'),
-      api.get<unknown>('/api/dashboard/audio'),
-      api.get<unknown>('/api/dashboard/alerts'),
-    ])
+  // Tick de 10s para que "Actualizado hace Xs" avance sin refetch
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 10_000)
+    return () => window.clearInterval(id)
+  }, [])
 
-    // Todos los datos pasan por su normalizador: la UI nunca toca datos crudos.
-    setSummary(s.status === 'fulfilled' ? normalizeDashboardSummary(s.value) : null)
-    setPhones(p.status === 'fulfilled' ? normalizeDashboardByPhone(p.value) : [])
-    setAgents(a.status === 'fulfilled' ? normalizeAgentPerformance(a.value) : [])
-    setActivity(act.status === 'fulfilled' ? normalizeDashboardActivity(act.value) : [])
-    setQuotes(q.status === 'fulfilled' ? normalizeDashboardQuotes(q.value) : null)
-    setAudio(au.status === 'fulfilled' ? normalizeDashboardAudio(au.value) : null)
-    setAlerts(al.status === 'fulfilled' ? normalizeDashboardAlerts(al.value) : [])
-
-    // Si el principal (summary) falló, mostramos error amigable (sin crashear).
-    if (s.status === 'rejected') {
-      setError('No se pudieron cargar algunas métricas del dashboard.')
-    }
-    setLoading(false)
-  }
-
-  useEffect(() => { load() }, [])
-
-  // Métricas casi en tiempo real: refresco silencioso cada 30s (pausa con la pestaña oculta)
-  useAutoRefresh(() => load(true), 30_000)
+  const summary = data?.summary ?? null
+  const phones = data?.phones ?? []
+  const agents = data?.agents ?? []
+  const activity = data?.activity ?? []
+  const quotes = data?.quotes ?? null
+  const audio = data?.audio ?? null
+  const alerts = data?.alerts ?? []
 
   if (loading) {
     return (
@@ -98,16 +64,33 @@ export default function DashboardPage() {
           <h2 className="text-xl font-semibold text-slate-900">Dashboard</h2>
           <p className="text-sm text-slate-500">Métricas del mes actual</p>
         </div>
-        <button
-          onClick={() => load()}
-          className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-        >
-          <RefreshCw className="h-4 w-4" />
-          Actualizar
-        </button>
+        <div className="flex items-center gap-3">
+          {lastUpdatedAt && (
+            <span className="text-xs text-slate-400" title={lastUpdatedAt.toLocaleTimeString()}>
+              Actualizado {timeAgo(lastUpdatedAt, now)}
+            </span>
+          )}
+          <button
+            onClick={() => refreshFresh()}
+            disabled={refreshing}
+            className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-60"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+            Actualizar
+          </button>
+        </div>
       </div>
 
       {error && <Alert variant="danger">{error}</Alert>}
+      {staleWarning && (
+        <Alert variant="warning">
+          No se pudo actualizar en el último intento; mostrando los datos más recientes
+          disponibles. Se reintentará automáticamente.
+        </Alert>
+      )}
+      {data?.summaryFailed && !error && (
+        <Alert variant="warning">No se pudieron cargar algunas métricas del dashboard.</Alert>
+      )}
 
       {/* Alerts */}
       {alerts.length > 0 && (
@@ -181,6 +164,36 @@ export default function DashboardPage() {
           value={summary ? `${Math.round(summary.monthlyUsage)}%` : '—'}
           icon={<TrendingUp className="h-5 w-5" />}
           variant={summary && summary.monthlyUsage > 80 ? 'danger' : 'default'}
+        />
+        <StatCard
+          label="Mensajes hoy"
+          value={summary ? formatInteger(summary.messagesToday) : '—'}
+          icon={<MessageSquare className="h-5 w-5" />}
+          variant="default"
+        />
+        <StatCard
+          label="Citas próximas"
+          value={summary ? formatInteger(summary.upcomingAppointments) : '—'}
+          icon={<Clock className="h-5 w-5" />}
+          variant="primary"
+        />
+        <StatCard
+          label="Citas pendientes"
+          value={summary ? formatInteger(summary.pendingAppointments) : '—'}
+          icon={<AlertCircle className="h-5 w-5" />}
+          variant={summary && summary.pendingAppointments > 0 ? 'warning' : 'default'}
+        />
+        <StatCard
+          label="Productos activos"
+          value={summary ? formatInteger(summary.activeProducts) : '—'}
+          icon={<FileText className="h-5 w-5" />}
+          variant="default"
+        />
+        <StatCard
+          label="Agentes activos"
+          value={summary ? formatInteger(summary.activeAgents) : '—'}
+          icon={<Bot className="h-5 w-5" />}
+          variant="default"
         />
       </div>
 

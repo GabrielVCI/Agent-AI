@@ -3,6 +3,7 @@ import { ShieldCheck, ArrowRight } from 'lucide-react'
 import { Navbar } from '@/components/landing/Navbar'
 import { Footer } from '@/components/layout/Footer'
 import { SectionBadge } from '@/components/ui/page-sections'
+import { SEOHead } from '@/components/seo/SEOHead'
 
 /* -------------------------------------------------------------------------- */
 /*  Constantes editables                                                       */
@@ -11,7 +12,7 @@ import { SectionBadge } from '@/components/ui/page-sections'
 const COMPANY_LEGAL_NAME = '[Nombre legal de la empresa]'
 const PLATFORM_NAME = 'Sendwary'
 const COMPANY_COUNTRY = 'República Dominicana'
-const SUPPORT_EMAIL = 'contacto@tudominio.com'
+const SUPPORT_EMAIL = 'info@sendwary.com'
 const LAST_UPDATED = '2026-07-02'
 
 /* -------------------------------------------------------------------------- */
@@ -72,7 +73,7 @@ const SECTIONS: Section[] = [
     blocks: [
       {
         list: [
-          `${PLATFORM_NAME} se apoya en proveedores como WhatsApp Business, Meta, proveedores de inteligencia artificial, correo (por ejemplo Resend) y hosting para operar el servicio.`,
+          `${PLATFORM_NAME} se apoya en proveedores como WhatsApp Business, Meta, proveedores de inteligencia artificial, envío de formularios (por ejemplo Web3Forms), verificación anti-bots (por ejemplo Google reCAPTCHA) y hosting para operar el servicio.`,
           'Estos proveedores pueden procesar datos únicamente para prestar sus funciones.',
           'El cliente es responsable de contar con el consentimiento de sus clientes finales cuando corresponda.',
           'El procesamiento de audios y mensajes se realiza para la atención, transcripción o interpretación, según el plan y la función disponible.',
@@ -156,6 +157,11 @@ function renderBlock(block: Block, key: number) {
 export default function PrivacidadPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Política de privacidad | Sendwary"
+        description="Conoce cómo Sendwary trata datos de contacto, formularios, solicitudes y uso de la plataforma conforme a sus políticas de privacidad."
+        path="/privacidad"
+      />
       <Navbar />
       <main>
         {/* Hero */}

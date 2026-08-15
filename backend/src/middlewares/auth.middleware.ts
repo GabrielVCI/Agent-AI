@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { resolveSession } from "../services/auth.service.js";
-import { env } from "../config/env.js";
+import { env, sessionCookieAttrs } from "../config/env.js";
 import { AppError } from "./error.middleware.js";
 
 export async function requireAuth(
@@ -23,15 +23,23 @@ export async function requireAuth(
 
     if (!token) {
       if (dbg) console.log("[AUTH MIDDLEWARE] -> 401 motivo: no llegó cookie", env.SESSION_COOKIE_NAME);
-      throw new AppError("No autenticado", 401);
+      throw new AppError("Tu sesión no está activa. Inicia sesión nuevamente.", 401, {
+        code: "UNAUTHENTICATED",
+        internalMessage: "sin cookie de sesión",
+      });
     }
 
     const user = await resolveSession(token);
 
     if (!user) {
       if (dbg) console.log("[AUTH MIDDLEWARE] -> 401 motivo: sesión no resuelta (no existe/expirada/revocada/usuario disabled)");
-      res.clearCookie(env.SESSION_COOKIE_NAME);
-      throw new AppError("Sesión inválida o expirada", 401);
+      // Mismos atributos que al emitirla: si no coinciden, el navegador no la
+      // borra y el usuario queda con una cookie zombi que falla en cada request.
+      res.clearCookie(env.SESSION_COOKIE_NAME, sessionCookieAttrs());
+      throw new AppError("Tu sesión expiró. Inicia sesión nuevamente.", 401, {
+        code: "SESSION_EXPIRED",
+        internalMessage: "sesión no resuelta (expirada/revocada/usuario disabled)",
+      });
     }
 
     if (dbg) console.log("[AUTH MIDDLEWARE] autenticado: sí | id:", user.id, "| role:", user.role, "| tenantId:", user.tenantId);

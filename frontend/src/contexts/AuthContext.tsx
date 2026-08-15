@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react'
 import { User } from '../types'
 import api from '../lib/api'
+import { getUserFriendlyErrorMessage } from '../lib/errors'
 
 interface AuthState {
   user: User | null
@@ -24,11 +25,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const user = await api.get<User>('/api/auth/me')
       setState({ user, loading: false, error: null })
     } catch (err: unknown) {
-      const e = err as { statusCode?: number; message?: string }
-      if (e?.statusCode === 401 || (err instanceof Error && err.message === 'Unauthorized')) {
+      const e = err as { statusCode?: number }
+      if (e?.statusCode === 401) {
+        // Sin sesión: estado normal (no es un error para mostrar)
         setState({ user: null, loading: false, error: null })
       } else {
-        setState({ user: null, loading: false, error: e?.message || 'Error de conexión' })
+        setState({ user: null, loading: false, error: getUserFriendlyErrorMessage(err) })
       }
     }
   }, [])

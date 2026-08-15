@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import PaginationBar from '../components/ui/PaginationBar'
 import {
   appointmentsApi,
   Appointment,
@@ -676,12 +677,31 @@ export default function AppointmentsPage() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  // Filtros
+  // Filtros. Sin fechas, el BACKEND aplica "últimos 30 días" por defecto
+  // (defaultRangeApplied llega en la respuesta para mostrar el aviso).
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterPriority, setFilterPriority] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+
+  // Paginación (server-side). REGLA: cualquier cambio de filtro resetea page=1
+  // (por eso los inputs usan los helpers set*AndResetPage de abajo).
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(20)
+  const [total, setTotal] = useState(0)
+  const [pages, setPages] = useState(1)
+  const [defaultRangeApplied, setDefaultRangeApplied] = useState(true)
+
+  const withPageReset = <T,>(setter: (v: T) => void) => (v: T) => {
+    setter(v)
+    setPage(1)
+  }
+  const setSearchF = withPageReset(setSearch)
+  const setFilterStatusF = withPageReset(setFilterStatus)
+  const setFilterPriorityF = withPageReset(setFilterPriority)
+  const setDateFromF = withPageReset(setDateFrom)
+  const setDateToF = withPageReset(setDateTo)
 
   // Modales
   const [formOpen, setFormOpen] = useState(false)
@@ -710,23 +730,32 @@ export default function AppointmentsPage() {
   const load = useCallback(async () => {
     setError('')
     try {
-      const data = await appointmentsApi.list({
+      const result = await appointmentsApi.list({
         search: search.trim() || undefined,
         status: (filterStatus || undefined) as Appointment['status'] | undefined,
         priority: (filterPriority || undefined) as Appointment['priority'] | undefined,
         dateFrom: dateFrom || undefined,
         dateTo: dateTo || undefined,
+        page,
+        limit,
+        // Últimos 30 días: lo más reciente primero
+        sortBy: 'scheduledAt',
+        sortOrder: 'desc',
       })
-      setAppointments(Array.isArray(data) ? data : [])
+      setAppointments(result.items)
+      setTotal(result.total)
+      setPages(result.pages)
+      setDefaultRangeApplied(Boolean(result.filters?.defaultRangeApplied))
     } catch (err: unknown) {
       const e = err as { message?: string }
       setError(e?.message || 'No se pudieron cargar las citas')
     } finally {
       setLoading(false)
     }
-  }, [search, filterStatus, filterPriority, dateFrom, dateTo])
+  }, [search, filterStatus, filterPriority, dateFrom, dateTo, page, limit])
 
   useEffect(() => {
+    // Debounce del search (300ms); el resto de filtros cargan de inmediato
     const t = window.setTimeout(load, search ? 300 : 0)
     return () => window.clearTimeout(t)
   }, [load, search])
@@ -736,8 +765,8 @@ export default function AppointmentsPage() {
 
   useEffect(() => {
     catalogApi
-      .listItems({ status: 'active' })
-      .then(items => setCatalogItems(Array.isArray(items) ? items : []))
+      .listItems({ status: 'active', limit: 100 })
+      .then(result => setCatalogItems(result.items))
       .catch(() => setCatalogItems([]))
   }, [])
 
@@ -839,14 +868,14 @@ export default function AppointmentsPage() {
           <input
             type="text"
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => setSearchF(e.target.value)}
             placeholder="Cliente, teléfono o servicio…"
             className={`${inputClass} pl-9`}
           />
         </div>
         <select
           value={filterStatus}
-          onChange={e => setFilterStatus(e.target.value)}
+          onChange={e => setFilterStatusF(e.target.value)}
           className={inputClass}
           title="Estado"
         >
@@ -859,7 +888,7 @@ export default function AppointmentsPage() {
         </select>
         <select
           value={filterPriority}
-          onChange={e => setFilterPriority(e.target.value)}
+          onChange={e => setFilterPriorityF(e.target.value)}
           className={inputClass}
           title="Prioridad"
         >
@@ -873,7 +902,7 @@ export default function AppointmentsPage() {
         <input
           type="date"
           value={dateFrom}
-          onChange={e => setDateFrom(e.target.value)}
+          onChange={e => setDateFromF(e.target.value)}
           className={inputClass}
           title="Desde"
           aria-label="Desde"
@@ -881,19 +910,55 @@ export default function AppointmentsPage() {
         <input
           type="date"
           value={dateTo}
-          onChange={e => setDateTo(e.target.value)}
+          onChange={e => setDateToF(e.target.value)}
           className={inputClass}
           title="Hasta"
           aria-label="Hasta"
         />
       </div>
 
+      {/* Rango efectivo: default 30 días del backend o fechas elegidas */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        {defaultRangeApplied && !dateFrom && !dateTo ? (
+          <>
+            <Badge variant="info">Mostrando últimos 30 días</Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const today = new Date().toISOString().slice(0, 10)
+                const inSixty = new Date(Date.now() + 60 * 86400_000).toISOString().slice(0, 10)
+                setDateFromF(today)
+                setDateToF(inSixty)
+              }}
+            >
+              Próximas citas
+            </Button>
+          </>
+        ) : (dateFrom || dateTo) ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setDateFromF('')
+              setDateToF('')
+            }}
+          >
+            Limpiar fechas (volver a últimos 30 días)
+          </Button>
+        ) : null}
+      </div>
+
       <Card padding="none">
         {appointments.length === 0 ? (
           <EmptyState
             icon={<CalendarDays className="h-10 w-10" />}
-            title="Sin citas"
-            description="Crea una cita manual o deja que tu agente IA registre solicitudes desde WhatsApp."
+            title={
+              search || filterStatus || filterPriority || dateFrom || dateTo
+                ? 'No encontramos resultados con estos filtros'
+                : 'Sin citas en los últimos 30 días'
+            }
+            description="Ajusta los filtros o el rango de fechas, crea una cita manual o deja que tu agente IA registre solicitudes desde WhatsApp."
             action={
               canManage ? (
                 <Button
@@ -1045,6 +1110,22 @@ export default function AppointmentsPage() {
                 </div>
               )
             })}
+          </div>
+        )}
+        {appointments.length > 0 && (
+          <div className="px-4 pb-3">
+            <PaginationBar
+              total={total}
+              page={page}
+              pages={pages}
+              limit={limit}
+              onPageChange={setPage}
+              onLimitChange={l => {
+                setLimit(l)
+                setPage(1)
+              }}
+              noun="citas"
+            />
           </div>
         )}
       </Card>

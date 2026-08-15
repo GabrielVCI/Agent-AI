@@ -154,6 +154,245 @@ function decimalOrNull(value: Prisma.Decimal | null | undefined): number | null 
  * Enterprise) tienen prioridad sobre el plan. Sin suscripción: fallback al
  * plan BASIC con warning (nunca lanza; nunca bloquea lectura de datos).
  */
+// ─── Estado de billing para el paywall (Parte B) ─────────────────────────────
+
+const PAST_DUE_GRACE_DAYS = 3;
+
+export interface TenantBillingStatus {
+  hasActivePlan: boolean;
+  planCode: string | null;
+  planName: string | null;
+  subscriptionStatus: string | null;
+  billingMode: string | null;
+  lemonSqueezySubscriptionId: string | null;
+  currentPeriodEnd: Date | null;
+  /** Motivo cuando NO hay plan activo, o warning informativo (PAST_DUE en gracia). */
+  reason:
+    | "OK"
+    | "PAST_DUE_GRACE" // activo con warning: pago vencido, dentro de los 3 días de gracia
+    | "NO_SUBSCRIPTION"
+    | "PAST_DUE_EXPIRED"
+    | "CANCELLED"
+    | "EXPIRED"
+    | "TRIAL_ENDED";
+}
+
+/**
+ * Regla única de "¿este tenant puede usar la plataforma?" (paywall):
+ * - ACTIVE (cualquier billingMode: MANUAL/CUSTOM/FREE/LEMONSQUEEZY) → activo.
+ * - CANCEL_REQUESTED → activo hasta que el admin procese la cancelación.
+ * - TRIALING → activo mientras currentPeriodEnd sea futuro (trials asignados
+ *   manualmente o on_trial de LemonSqueezy); vencido → paywall.
+ * - PAST_DUE → activo CON WARNING durante 3 días de gracia tras
+ *   currentPeriodEnd; luego paywall.
+ * - CANCELLED/EXPIRED/sin suscripción → paywall.
+ * El bypass de SUPER_ADMIN es del guard (no llega aquí: no tiene tenant).
+ */
+export async function getTenantBillingStatus(tenantId: string): Promise<TenantBillingStatus> {
+  const subscription = await prisma.subscription.findUnique({
+    where: { tenantId },
+    include: { plan: { select: { code: true, name: true } } },
+  });
+
+  const base = {
+    planCode: subscription?.plan?.code ?? null,
+    planName: subscription
+      ? subscription.customPlanName ?? subscription.plan?.name ?? null
+      : null,
+    subscriptionStatus: subscription?.status ?? null,
+    billingMode: subscription?.billingMode ?? null,
+    lemonSqueezySubscriptionId: subscription?.lemonSqueezySubscriptionId ?? null,
+    currentPeriodEnd: subscription?.currentPeriodEnd ?? null,
+  };
+
+  if (!subscription) {
+    return { ...base, hasActivePlan: false, reason: "NO_SUBSCRIPTION" };
+  }
+
+  const now = Date.now();
+  switch (subscription.status) {
+    case "ACTIVE":
+    case "CANCEL_REQUESTED":
+      return { ...base, hasActivePlan: true, reason: "OK" };
+    case "TRIALING": {
+      if (subscription.currentPeriodEnd.getTime() > now) {
+        return { ...base, hasActivePlan: true, reason: "OK" };
+      }
+      return { ...base, hasActivePlan: false, reason: "TRIAL_ENDED" };
+    }
+    case "PAST_DUE": {
+      const graceEnd =
+        subscription.currentPeriodEnd.getTime() + PAST_DUE_GRACE_DAYS * 86_400_000;
+      if (graceEnd > now) {
+        return { ...base, hasActivePlan: true, reason: "PAST_DUE_GRACE" };
+      }
+      return { ...base, hasActivePlan: false, reason: "PAST_DUE_EXPIRED" };
+    }
+    case "CANCELLED":
+      return { ...base, hasActivePlan: false, reason: "CANCELLED" };
+    case "EXPIRED":
+    default:
+      return { ...base, hasActivePlan: false, reason: "EXPIRED" };
+  }
+}
+
+// ─── Estado de activación comercial (verificación → implementación → 1er mes) ─
+
+/** Lifecycle states que muestran la pantalla premium de implementación. */
+const IMPLEMENTATION_LIFECYCLES = [
+  "REGISTERED",
+  "EMAIL_PENDING",
+  "EMAIL_VERIFIED",
+  "IMPLEMENTATION_PENDING",
+  "IMPLEMENTATION_IN_PROGRESS",
+] as const;
+
+export interface TenantActivationState {
+  emailVerified: boolean;
+  lifecycleStatus: string;
+  implementationStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED";
+  implementationFeePaid: boolean;
+  implementationFeePaidAt: Date | null;
+  implementationStartedAt: Date | null;
+  implementationExpectedEndAt: Date | null;
+  finalActivationDate: Date | null;
+  firstMonthEndsAt: Date | null;
+  hasActiveSubscription: boolean;
+  shouldShowPaywall: boolean;
+  shouldShowImplementationScreen: boolean;
+  paywallBypassUntil: Date | null;
+  reason:
+    | "OK"
+    | "EMAIL_NOT_VERIFIED"
+    | "IMPLEMENTATION"
+    | "FIRST_MONTH"
+    | "PAYWALL_BYPASS"
+    | "FIRST_MONTH_ENDED"
+    | TenantBillingStatus["reason"];
+}
+
+/**
+ * Regla única del flujo comercial premium (Parte K):
+ * 1. Email sin verificar → pantalla "Verifica tu correo" (nunca paywall).
+ * 2. Lifecycle en implementación → pantalla de implementación (nunca paywall).
+ * 3. Lifecycle completado/activo:
+ *    - suscripción activa (LEMONSQUEEZY/MANUAL/CUSTOM/FREE) → dashboard.
+ *    - dentro del primer mes (finalActivationDate → firstMonthEndsAt) → dashboard.
+ *    - bypass de paywall vigente (SUPER_ADMIN) → dashboard.
+ *    - resto → paywall de planes.
+ * Tenants legados (lifecycle ACTIVE sin finalActivationDate) conservan el
+ * comportamiento actual: decide la suscripción. SUPER_ADMIN nunca llega aquí.
+ */
+export async function getTenantActivationState(
+  tenantId: string,
+  userEmailVerified: boolean
+): Promise<TenantActivationState> {
+  const [tenant, billing] = await Promise.all([
+    prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: {
+        lifecycleStatus: true,
+        emailVerifiedAt: true,
+        implementationFeePaidAt: true,
+        implementationStartedAt: true,
+        implementationExpectedEndAt: true,
+        finalActivationDate: true,
+        firstMonthEndsAt: true,
+        paywallBypassUntil: true,
+      },
+    }),
+    getTenantBillingStatus(tenantId),
+  ]);
+
+  const now = Date.now();
+  const lifecycle = tenant?.lifecycleStatus ?? "ACTIVE";
+  const inImplementation = (IMPLEMENTATION_LIFECYCLES as readonly string[]).includes(lifecycle);
+  const bypassActive = Boolean(
+    tenant?.paywallBypassUntil && tenant.paywallBypassUntil.getTime() > now
+  );
+  const withinFirstMonth = Boolean(
+    tenant?.finalActivationDate &&
+      tenant.firstMonthEndsAt &&
+      tenant.firstMonthEndsAt.getTime() > now
+  );
+  const firstMonthEnded = Boolean(
+    tenant?.finalActivationDate &&
+      tenant.firstMonthEndsAt &&
+      tenant.firstMonthEndsAt.getTime() <= now
+  );
+
+  const base = {
+    emailVerified: userEmailVerified,
+    lifecycleStatus: lifecycle,
+    implementationStatus:
+      lifecycle === "IMPLEMENTATION_IN_PROGRESS"
+        ? ("IN_PROGRESS" as const)
+        : inImplementation
+          ? ("PENDING" as const)
+          : ("COMPLETED" as const),
+    implementationFeePaid: Boolean(tenant?.implementationFeePaidAt),
+    implementationFeePaidAt: tenant?.implementationFeePaidAt ?? null,
+    implementationStartedAt: tenant?.implementationStartedAt ?? null,
+    implementationExpectedEndAt: tenant?.implementationExpectedEndAt ?? null,
+    finalActivationDate: tenant?.finalActivationDate ?? null,
+    firstMonthEndsAt: tenant?.firstMonthEndsAt ?? null,
+    hasActiveSubscription: billing.hasActivePlan,
+    paywallBypassUntil: tenant?.paywallBypassUntil ?? null,
+  };
+
+  if (!userEmailVerified) {
+    return {
+      ...base,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: false,
+      reason: "EMAIL_NOT_VERIFIED",
+    };
+  }
+
+  if (inImplementation) {
+    return {
+      ...base,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: true,
+      reason: "IMPLEMENTATION",
+    };
+  }
+
+  if (billing.hasActivePlan) {
+    return {
+      ...base,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: false,
+      reason: billing.reason,
+    };
+  }
+
+  if (withinFirstMonth) {
+    return {
+      ...base,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: false,
+      reason: "FIRST_MONTH",
+    };
+  }
+
+  if (bypassActive) {
+    return {
+      ...base,
+      shouldShowPaywall: false,
+      shouldShowImplementationScreen: false,
+      reason: "PAYWALL_BYPASS",
+    };
+  }
+
+  return {
+    ...base,
+    shouldShowPaywall: true,
+    shouldShowImplementationScreen: false,
+    reason: firstMonthEnded ? "FIRST_MONTH_ENDED" : billing.reason,
+  };
+}
+
 export async function getTenantActiveSubscription(
   tenantId: string
 ): Promise<TenantSubscriptionInfo> {
@@ -324,6 +563,10 @@ export async function getBillingOverview(tenantId: string) {
             subscription.nextBillingDate ?? subscription.renewsAt ?? subscription.currentPeriodEnd,
           endsAt: subscription.endsAt,
           hasPaymentProvider: Boolean(subscription.lemonSqueezySubscriptionId),
+          // IDs de LemonSqueezy del PROPIO tenant (no son secretos: identifican
+          // su suscripción para soporte). La API key jamás sale del backend.
+          lemonSqueezySubscriptionId: subscription.lemonSqueezySubscriptionId,
+          lemonSqueezyCustomerId: subscription.lemonSqueezyCustomerId,
         }
       : null,
     usage: {

@@ -39,6 +39,6 @@ export function SendwaryWordmark({
   )
 }
 
-export function SendwaryLogo({ className = 'h-12' }: { className?: string }) {
+export function SendwaryLogo({ className = 'h-14' }: { className?: string }) {
   return <img src="/logo.png" alt="Sendwary" className={`${className} w-auto`} />
 }

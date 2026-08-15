@@ -69,6 +69,12 @@ export interface DashboardSummaryView {
   outboundMessages: number
   unresolvedConversations: number
   aiResolvedConversations: number
+  // Fase consistencia: métricas operativas en vivo
+  messagesToday: number
+  upcomingAppointments: number
+  pendingAppointments: number
+  activeProducts: number
+  activeAgents: number
 }
 
 export interface PhoneSummaryView {
@@ -144,6 +150,11 @@ export function normalizeDashboardSummary(raw: unknown): DashboardSummaryView {
     outboundMessages: toNumber(r.outboundMessages),
     unresolvedConversations: toNumber(r.unresolvedConversations ?? r.unansweredConversations),
     aiResolvedConversations: toNumber(r.aiResolvedConversations ?? r.closedConversations),
+    messagesToday: toNumber(r.messagesToday),
+    upcomingAppointments: toNumber(r.upcomingAppointments),
+    pendingAppointments: toNumber(r.pendingAppointments),
+    activeProducts: toNumber(r.activeProducts),
+    activeAgents: toNumber(r.activeAgents),
   }
 }
 

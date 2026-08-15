@@ -10,13 +10,17 @@ export function requireRole(...roles: UserRoleType[]) {
   return (req: Request, _res: Response, next: NextFunction): void => {
     if (!req.user) {
       if (dbg) console.log("[AUTH ROLES] requireRole -> 401: no autenticado |", req.method, req.originalUrl);
-      next(new AppError("No autenticado", 401));
+      next(AppError.fromCode("UNAUTHENTICATED"));
       return;
     }
 
     if (!roles.includes(req.user.role)) {
       if (dbg) console.log("[AUTH ROLES] requireRole -> 403 |", req.originalUrl, "| requerido:", roles.join(","), "| actual:", req.user.role);
-      next(new AppError("Acceso denegado: permisos insuficientes", 403));
+      next(
+        AppError.fromCode("FORBIDDEN", {
+          internalMessage: `rol ${req.user.role}, requerido: ${roles.join(",")}`,
+        })
+      );
       return;
     }
 
@@ -30,7 +34,11 @@ export function requireSuperAdmin(
   next: NextFunction
 ): void {
   if (!req.user || req.user.role !== "SUPER_ADMIN") {
-    next(new AppError("Acceso restringido a administradores del sistema", 403));
+    next(
+      AppError.fromCode("FORBIDDEN", {
+        internalMessage: `requireSuperAdmin: rol ${req.user?.role ?? "anónimo"}`,
+      })
+    );
     return;
   }
   next();
@@ -42,7 +50,7 @@ export function requireTenantAccess(
   next: NextFunction
 ): void {
   if (!req.user) {
-    next(new AppError("No autenticado", 401));
+    next(AppError.fromCode("UNAUTHENTICATED"));
     return;
   }
 
@@ -54,7 +62,11 @@ export function requireTenantAccess(
 
   if (!req.user.tenantId) {
     if (dbg) console.log("[AUTH ROLES] requireTenantAccess -> 403: usuario sin tenantId |", req.originalUrl, "| role:", req.user.role);
-    next(new AppError("Usuario no asociado a ninguna empresa", 403));
+    next(
+      AppError.fromCode("TENANT_REQUIRED", {
+        internalMessage: `usuario ${req.user.id} (${req.user.role}) sin tenantId`,
+      })
+    );
     return;
   }
 

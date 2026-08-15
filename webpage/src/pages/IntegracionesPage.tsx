@@ -30,6 +30,7 @@ import { SectionBadge, IconBadge, CtaButtons } from '@/components/ui/page-sectio
 import { BrandIcon, type BrandName } from '@/components/ui/brand-icon'
 import { IntegrationBadge } from '@/components/ui/integration-badge'
 import { cn } from '@/lib/utils'
+import { SEOHead } from '@/components/seo/SEOHead'
 
 /* ========================================================================== */
 /*  Datos                                                                      */
@@ -523,6 +524,11 @@ function PageCTA() {
 export default function IntegracionesPage() {
   return (
     <div className="min-h-screen bg-white dark:bg-neutral-950">
+      <SEOHead
+        title="Integraciones Sendwary | Odoo, SAP, QuickBooks, CRM y sistemas internos"
+        description="Sendwary puede evaluarse para integraciones con CRM, Odoo, SAP, QuickBooks, inventarios, ecommerce, APIs y sistemas internos bajo requerimiento técnico."
+        path="/integraciones"
+      />
       <Navbar />
       <main>
         <PageHero />

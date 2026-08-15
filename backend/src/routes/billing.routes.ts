@@ -8,6 +8,8 @@ import {
 import {
   listPlansController,
   getSubscriptionController,
+  getBillingStatusController,
+  getActivationStatusController,
   getUsageController,
   createCheckoutController,
   lemonSqueezyWebhookController,
@@ -18,10 +20,15 @@ export const billingRoutes = Router();
 // Webhook público (lo llama LemonSqueezy; se valida por firma HMAC, no por sesión)
 billingRoutes.post("/lemonsqueezy/webhook", webhookRateLimit, lemonSqueezyWebhookController);
 
+// Estado de activación comercial: requiere sesión pero NO tenant (usuarios
+// recién registrados aún no tienen empresa y el gate del frontend lo necesita)
+billingRoutes.get("/activation-status", requireAuth, getActivationStatusController);
+
 billingRoutes.use(requireAuth, requireTenantAccess);
 
 billingRoutes.get("/plans", listPlansController);
 billingRoutes.get("/subscription", getSubscriptionController);
+billingRoutes.get("/status", getBillingStatusController);
 billingRoutes.get("/usage", getUsageController);
 billingRoutes.post(
   "/create-checkout",

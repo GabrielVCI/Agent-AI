@@ -224,6 +224,8 @@ export async function handleIncomingWhatsappAudioMessage(input: {
   messageId: string;
   mediaId?: string;
   timestamp?: string;
+  // Credenciales del tenant para descargar el media de Meta (webhook multi-tenant)
+  credentials?: import("./meta-whatsapp.service.js").SendCredentials;
 }): Promise<WhatsappIncomingResponse> {
   const { tenantId, agentId } = input;
 
@@ -380,7 +382,7 @@ export async function handleIncomingWhatsappAudioMessage(input: {
 
   let media: { buffer: Buffer; mimeType: string } | null = null;
   try {
-    media = await downloadWhatsappMedia(input.mediaId);
+    media = await downloadWhatsappMedia(input.mediaId, input.credentials);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     logger.error(`[WHATSAPP AUDIO] descarga de media falló (${input.mediaId}): ${error}`);
@@ -462,9 +464,22 @@ export async function handleIncomingWhatsappAudioMessage(input: {
   });
 }
 
+/**
+ * Resuelve tenant + agente para un phone_number_id entrante (webhook).
+ *
+ * Orden de resolución:
+ * 1. Agente del tenant con ese número asignado (caso normal).
+ * 2. WhatsAppIntegration CONNECTED con ese número → agente activo del mismo
+ *    tenant. Cubre al cliente que conectó su número (o se lo conectamos en
+ *    modo guiado) pero aún no ejecutó el paso de "asignar agente": antes esos
+ *    mensajes se perdían en silencio.
+ * Nunca cruza tenants: el phoneNumberId es único global en ambas tablas.
+ */
 export async function resolveAgentByPhoneNumberId(
   phoneNumberId: string
 ): Promise<{ tenantId: string; agentId: string; agent: any } | null> {
+  if (!phoneNumberId) return null;
+
   const agent = await prisma.agent.findFirst({
     where: {
       whatsappPhoneNumberId: phoneNumberId,
@@ -474,13 +489,31 @@ export async function resolveAgentByPhoneNumberId(
     include: { tenant: true },
   });
 
-  if (!agent) return null;
+  if (agent) {
+    return { tenantId: agent.tenantId, agentId: agent.id, agent };
+  }
 
-  return {
-    tenantId: agent.tenantId,
-    agentId: agent.id,
-    agent,
-  };
+  const integration = await prisma.whatsAppIntegration.findUnique({
+    where: { phoneNumberId },
+    select: { tenantId: true, status: true },
+  });
+  if (!integration || integration.status !== "CONNECTED") return null;
+
+  const fallbackAgent = await prisma.agent.findFirst({
+    where: {
+      tenantId: integration.tenantId,
+      status: "ACTIVE",
+      tenant: { status: "ACTIVE" },
+    },
+    orderBy: { createdAt: "asc" },
+    include: { tenant: true },
+  });
+  if (!fallbackAgent) return null;
+
+  logger.warn(
+    `[WHATSAPP WEBHOOK] número ${phoneNumberId} sin agente asignado: se usa el agente activo ${fallbackAgent.name} del tenant ${integration.tenantId}. Asigna el número en el panel para fijar el ruteo.`
+  );
+  return { tenantId: fallbackAgent.tenantId, agentId: fallbackAgent.id, agent: fallbackAgent };
 }
 
 export async function handleIncomingWhatsappMessage(

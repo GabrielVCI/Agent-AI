@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import { prisma } from "../config/prisma.js";
 import {
   listTenants,
   getTenantById,
@@ -18,6 +19,11 @@ import {
   updateTenantInfo,
   updateTenantSubscription,
   resetTenantUsage,
+  updateImplementationSchema,
+  updateTenantImplementation,
+  resendTenantVerificationEmail,
+  resendTenantImplementationEmail,
+  sendTenantImplementationReminder,
 } from "../services/admin.service.js";
 import {
   getVoiceSettings,
@@ -36,11 +42,43 @@ const createUserSchema = z.object({
 
 export async function listTenantsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 20;
-    const result = await listTenants(page, limit);
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const search =
+      typeof req.query.search === "string" ? req.query.search.trim().slice(0, 120) : undefined;
+    const rawStatus = typeof req.query.status === "string" ? req.query.status : undefined;
+    const status = ["ACTIVE", "SUSPENDED", "CANCELLED"].includes(rawStatus ?? "")
+      ? rawStatus
+      : undefined;
+    const result = await listTenants(page, limit, search || undefined, status);
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
+}
+
+/** Webhooks de billing sin asociar (revisión manual; nunca se activa "adivinando"). */
+export async function listUnmatchedWebhooksController(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const rows = await prisma.unmatchedBillingWebhook.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        provider: true,
+        eventName: true,
+        lemonSqueezySubscriptionId: true,
+        customerEmail: true,
+        createdAt: true,
+        resolvedAt: true,
+      },
+    });
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    next(err);
+  }
 }
 
 export async function getTenantController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -83,6 +121,75 @@ export async function updateSubscriptionController(req: Request, res: Response, 
     }
     const subscription = await updateTenantSubscription(req.params.id, parsed.data);
     res.json({ success: true, data: subscription });
+  } catch (err) { next(err); }
+}
+
+// ─── Implementación y activación comercial ───────────────────────────────────
+
+export async function updateImplementationController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const parsed = updateImplementationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Datos inválidos", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    const tenant = await updateTenantImplementation(req.params.id, parsed.data, req.user?.id);
+    res.json({ success: true, data: tenant, message: "Implementación actualizada" });
+  } catch (err) { next(err); }
+}
+
+export async function resendVerificationEmailController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await resendTenantVerificationEmail(req.params.id);
+    res.json({
+      success: true,
+      data: result,
+      message: result.sent ? "Correo de verificación reenviado" : result.reason,
+    });
+  } catch (err) { next(err); }
+}
+
+export async function resendImplementationEmailController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await resendTenantImplementationEmail(req.params.id);
+    res.json({
+      success: true,
+      data: result,
+      message: result.sent
+        ? "Correo de implementación reenviado"
+        : "Correo registrado en logs (SMTP no configurado)",
+    });
+  } catch (err) { next(err); }
+}
+
+/** Recordatorio del pago de implementación al OWNER del tenant. */
+export async function sendImplementationReminderController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const result = await sendTenantImplementationReminder(req.params.id, req.user?.id);
+    res.json({
+      success: true,
+      data: result,
+      message: result.sent
+        ? "Recordatorio de implementación enviado"
+        : (result as { reason?: string }).reason ??
+          "No pudimos enviar el correo en este momento. Intenta nuevamente.",
+    });
   } catch (err) { next(err); }
 }
 

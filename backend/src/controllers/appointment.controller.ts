@@ -21,7 +21,13 @@ const listQuerySchema = z.object({
     .enum(["PENDING", "CONFIRMED", "CANCELLED", "RESCHEDULED", "NO_SHOW", "COMPLETED"])
     .optional(),
   priority: z.enum(["LOW", "NORMAL", "HIGH", "FOLLOW_UP"]).optional(),
-  search: z.string().optional(),
+  search: z.string().max(120).optional(),
+  agentId: z.string().optional(),
+  source: z.enum(["AI", "MANUAL", "WHATSAPP", "ADMIN"]).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  sortBy: z.enum(["scheduledAt", "requestedAt", "createdAt"]).optional(),
+  sortOrder: z.enum(["asc", "desc"]).optional(),
 });
 
 const appointmentSchema = z.object({

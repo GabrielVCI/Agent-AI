@@ -1,3 +1,5 @@
+import { CONNECTION_ERROR_MESSAGE, friendlyMessageForStatus } from './errors'
+
 const BASE_URL = import.meta.env.VITE_API_URL || ''
 
 type RequestOptions = RequestInit & {
@@ -7,24 +9,33 @@ type RequestOptions = RequestInit & {
 /**
  * Sobre estándar del backend. TODAS las respuestas lo usan:
  *   éxito -> { success: true, data: ... }
- *   error -> { success: false, message?/error?, errors? }
+ *   error -> { success: false, message, error: { code, message, details? }, errors? }
+ * (error como string es el formato legacy; se sigue aceptando)
  */
 type ApiEnvelope<T> = {
   success?: boolean
   data?: T
   message?: string
-  error?: string
+  error?: string | { code?: string; message?: string; details?: Record<string, unknown> }
   errors?: Record<string, string[] | string>
 }
 
 export class ApiError extends Error {
   statusCode?: number
+  /** Código estable del backend (INVALID_CREDENTIALS, FORBIDDEN...). */
+  code?: string
   fieldErrors?: Record<string, string[] | string>
-  constructor(message: string, statusCode?: number, fieldErrors?: Record<string, string[] | string>) {
+  constructor(
+    message: string,
+    statusCode?: number,
+    fieldErrors?: Record<string, string[] | string>,
+    code?: string
+  ) {
     super(message)
     this.name = 'ApiError'
     this.statusCode = statusCode
     this.fieldErrors = fieldErrors
+    this.code = code
   }
 }
 
@@ -68,19 +79,14 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     })
   } catch {
     // El servidor no respondió (caído, sin red, CORS).
-    throw new ApiError('No se pudo conectar con el servidor. Verifica que el backend esté activo.', 0)
-  }
-
-  if (response.status === 401) {
-    throw new ApiError('Unauthorized', 401)
-  }
-  if (response.status === 403) {
-    throw new ApiError('Forbidden', 403)
+    throw new ApiError(CONNECTION_ERROR_MESSAGE, 0)
   }
 
   if (response.status === 204) return undefined as T
 
-  // Intentamos parsear el cuerpo (puede no ser JSON en errores de infra).
+  // SIEMPRE parseamos el body primero (también en 401/403): el backend manda
+  // mensajes amigables (ej. "Usuario o clave incorrecta.") que la UI debe
+  // mostrar. Nunca lanzamos textos crudos como "Unauthorized" o "Error 500".
   let body: ApiEnvelope<T> | null = null
   try {
     body = (await response.json()) as ApiEnvelope<T>
@@ -89,19 +95,26 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   if (!response.ok) {
+    const errorObj = typeof body?.error === 'object' && body.error !== null ? body.error : null
     const message =
       body?.message ||
-      body?.error ||
+      errorObj?.message ||
+      (typeof body?.error === 'string' ? body.error : '') ||
       flattenFieldErrors(body?.errors) ||
-      `Error ${response.status}`
-    throw new ApiError(message, response.status, body?.errors)
+      friendlyMessageForStatus(response.status)
+    throw new ApiError(message, response.status, body?.errors, errorObj?.code)
   }
 
   // 2xx pero el backend marcó success:false (siempre revisamos el sobre).
   if (body && body.success === false) {
+    const errorObj = typeof body.error === 'object' && body.error !== null ? body.error : null
     const message =
-      body.message || body.error || flattenFieldErrors(body.errors) || 'La operación no fue exitosa'
-    throw new ApiError(message, response.status, body.errors)
+      body.message ||
+      errorObj?.message ||
+      (typeof body.error === 'string' ? body.error : '') ||
+      flattenFieldErrors(body.errors) ||
+      'La operación no fue exitosa'
+    throw new ApiError(message, response.status, body.errors, errorObj?.code)
   }
 
   // Desenvolvemos el sobre: el consumidor recibe directamente `data`.
@@ -145,15 +158,20 @@ export const api = {
     try {
       response = await fetch(url, { credentials: 'include' })
     } catch {
-      throw new ApiError('No se pudo conectar con el servidor. Verifica que el backend esté activo.', 0)
+      throw new ApiError(CONNECTION_ERROR_MESSAGE, 0)
     }
     if (!response.ok) {
-      let message = `Error ${response.status}`
+      let message = friendlyMessageForStatus(response.status)
       try {
         const body = (await response.json()) as ApiEnvelope<unknown>
-        message = body?.message || body?.error || message
+        const errorObj = typeof body?.error === 'object' && body.error !== null ? body.error : null
+        message =
+          body?.message ||
+          errorObj?.message ||
+          (typeof body?.error === 'string' ? body.error : '') ||
+          message
       } catch {
-        // cuerpo no-JSON: usamos el mensaje genérico
+        // cuerpo no-JSON: usamos el mensaje amigable por status
       }
       throw new ApiError(message, response.status)
     }
