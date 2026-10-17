@@ -13,6 +13,27 @@
 import "dotenv/config";
 import { prisma } from "../src/config/prisma.js";
 
+/**
+ * Variantes de LemonSqueezy declaradas por entorno, si las hay.
+ *
+ * Devuelve un objeto VACÍO cuando la variable no está puesta, de modo que el
+ * upsert no sobrescriba con null una configuración ya cargada en la BD.
+ *
+ * Los ids de LemonSqueezy NO son secretos (identifican un producto público),
+ * pero aun así solo viven en el backend.
+ */
+function lemonConfigFromEnv(code: string): {
+  lemonSqueezyVariantId?: string;
+  lemonSqueezyProductId?: string;
+} {
+  const variant = process.env[`LEMONSQUEEZY_${code}_VARIANT_ID`];
+  const product = process.env[`LEMONSQUEEZY_${code}_PRODUCT_ID`];
+  return {
+    ...(variant ? { lemonSqueezyVariantId: String(variant) } : {}),
+    ...(product ? { lemonSqueezyProductId: String(product) } : {}),
+  };
+}
+
 const plans = [
   {
     code: "BASIC",
@@ -136,14 +157,22 @@ async function main() {
   const byCode = new Map<string, string>();
   for (const plan of plans) {
     const { code, featuresJson, ...data } = plan;
+    // La configuración comercial de LemonSqueezy pertenece al Plan. Si el
+    // ambiente todavía la lleva en variables de entorno, se copia a la BD aquí
+    // (es la fuente que usa el checkout). Sin variable, el valor existente NO
+    // se pisa con null: un plan ya configurado a mano se respeta.
+    const lemon = lemonConfigFromEnv(code);
+
     const result = await prisma.plan.upsert({
       where: { code },
-      create: { code, ...data, featuresJson: [...featuresJson], isActive: true },
-      update: { ...data, featuresJson: [...featuresJson], isActive: true },
+      create: { code, ...data, ...lemon, featuresJson: [...featuresJson], isActive: true },
+      update: { ...data, ...lemon, featuresJson: [...featuresJson], isActive: true },
     });
     byCode.set(code, result.id);
     console.log(
-      `✓ Plan ${code}: USD ${result.priceMonthly}/mes, ${result.monthlyMessageLimit} msg/mes (id ${result.id})`
+      `✓ Plan ${code}: USD ${result.priceMonthly}/mes, ${result.monthlyMessageLimit} msg/mes` +
+        ` ${result.lemonSqueezyVariantId ? `[LS variant ${result.lemonSqueezyVariantId}]` : "[sin variante LS: pago online deshabilitado]"}` +
+        ` (id ${result.id})`
     );
   }
 

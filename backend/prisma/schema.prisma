@@ -109,6 +109,143 @@ model UnmatchedBillingWebhook {
   @@index([createdAt])
 }
 
+/// Estado TÉCNICO de una correlación de LemonSqueezy. NO es SubscriptionStatus:
+/// describe en qué punto está el emparejamiento "suscripción de LS ↔ tenant",
+/// no si el cliente tiene acceso (eso lo dice Subscription.status).
+enum LemonSqueezyCorrelationStatus {
+  /// subscription_created correlacionado; falta que LS confirme el primer pago.
+  PENDING_PAYMENT
+  /// El pago llegó ANTES que subscription_created (o sin custom_data): la
+  /// factura queda guardada esperando saber de qué tenant es.
+  PENDING_CORRELATION
+  /// Primer pago confirmado; la Subscription local aún no pudo escribirse
+  /// (p. ej. la API de LS no respondió). Reprocesable.
+  PAID
+  /// Subscription local creada/activada a partir de este primer pago.
+  PROCESSED
+  /// Inconsistencia detectada (variante que no corresponde al plan, tenant o
+  /// plan inexistente, test_mode incoherente). NUNCA activa nada.
+  INVALID
+}
+
+/// Correlación persistente entre una suscripción de LemonSqueezy y el
+/// tenant/plan de Sendwary que la originó.
+///
+/// Existe porque los dos eventos del alta traen datos distintos:
+///   · `subscription_created` trae `meta.custom_data` (tenant_id, plan_id) pero
+///     NO confirma el cobro.
+///   · `subscription_payment_success` trae la FACTURA (billing_reason, status)
+///     y puede no traer custom_data.
+/// Guardar aquí el vínculo es lo que permite que el pago —única autoridad para
+/// activar— sepa a quién activar, y que ambos eventos lleguen en cualquier orden.
+///
+/// Esta fila NO concede acceso por sí misma: el entitlement vive en
+/// Subscription. Aquí solo hay estado técnico de emparejamiento.
+model LemonSqueezySubscriptionCorrelation {
+  id String @id @default(cuid())
+
+  /// Id de la suscripción en LemonSqueezy. UNIQUE: es la clave de correlación
+  /// y la barrera contra filas duplicadas bajo concurrencia.
+  // Nombre del índice acortado a mano: el que Prisma derivaría supera los 63
+  // caracteres que PostgreSQL admite en un identificador y quedaría truncado.
+  lemonSqueezySubscriptionId String @unique(map: "LemonSqueezySubCorrelation_subscriptionId_key")
+
+  /// Nulos solo mientras el pago haya llegado antes que `subscription_created`.
+  /// Sin relación declarada a propósito: es una tabla técnica de billing que
+  /// debe sobrevivir para soporte aunque el tenant desaparezca; tenant y plan
+  /// se RE-VALIDAN contra la BD antes de activar nada.
+  tenantId String?
+  planId   String?
+
+  /// Variante que el plan declaraba al crear el checkout. El primer pago debe
+  /// cobrar exactamente esta variante (validación cruzada en el handler).
+  expectedVariantId String?
+
+  lemonSqueezyCustomerId String?
+  lemonSqueezyOrderId    String?
+  lemonSqueezyProductId  String?
+  lemonSqueezyVariantId  String?
+
+  status LemonSqueezyCorrelationStatus @default(PENDING_PAYMENT)
+
+  /// Factura del PRIMER cobro (billing_reason=initial) que activó —o activará—
+  /// la suscripción. Idempotencia: la misma factura no se aplica dos veces.
+  paidInvoiceId String?
+  paidAt        DateTime?
+
+  /// true = suscripción de TEST MODE de LemonSqueezy.
+  testMode Boolean?
+
+  /// Suscripción local resultante, cuando ya se creó.
+  subscriptionId String?
+
+  processedAt DateTime?
+  /// Motivo técnico corto del último rechazo (sin secretos ni payload).
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([lemonSqueezyCustomerId])
+}
+
+/// Estado de procesamiento de un webhook de LemonSqueezy.
+enum LemonSqueezyWebhookStatus {
+  RECEIVED
+  PROCESSED
+  /// Recibido y descartado a propósito (evento que no nos interesa, o sin
+  /// tenant mapeable). No es un fallo: no debe reintentarse.
+  IGNORED
+  FAILED
+}
+
+/// Registro de idempotencia de los webhooks de LemonSqueezy.
+///
+/// LS reintenta los eventos; sin esto un `subscription_created` repetido
+/// volvería a ejecutar efectos. `dedupeKey` es la identidad estable del
+/// evento (eventName + tipo + id de recurso + hash del cuerpo crudo): un
+/// reintento idéntico choca contra el UNIQUE y se responde 200 sin reprocesar.
+///
+/// NO se guarda el body crudo (puede traer PII y datos de pago): solo su
+/// hash SHA-256 y los identificadores necesarios para soporte.
+model LemonSqueezyWebhookEvent {
+  id String @id @default(cuid())
+
+  eventName    String
+  /// "subscriptions", "subscription-invoices", "orders"...
+  resourceType String
+  /// Id del recurso en LemonSqueezy (data.id).
+  resourceId   String?
+
+  /// Identidad estable del evento. UNIQUE: es la barrera de idempotencia.
+  dedupeKey   String @unique
+  /// SHA-256 hex del cuerpo crudo recibido (auditoría, nunca el cuerpo).
+  payloadHash String
+
+  status LemonSqueezyWebhookStatus @default(RECEIVED)
+
+  /// Se llenan cuando el evento pudo correlacionarse.
+  tenantId       String?
+  subscriptionId String?
+
+  receivedAt   DateTime  @default(now())
+  processedAt  DateTime?
+  attemptCount Int       @default(1)
+  /// Mensaje técnico corto del último fallo (sin secretos ni payload).
+  lastError    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([eventName])
+  @@index([status])
+  @@index([resourceId])
+  @@index([tenantId])
+  @@index([receivedAt])
+}
+
 enum CancellationStatus {
   PENDING
   APPROVED
@@ -306,105 +443,113 @@ enum MetricType {
 // ─── Models ──────────────────────────────────────────────────────────────────
 
 model Tenant {
-  id        String       @id @default(cuid())
-  name      String
-  legalName String?
-  rnc       String?
-  logoUrl   String?
-  address   String?
-  phone     String?
-  email     String?
-  industry  String?
-  timezone  String       @default("America/Santo_Domingo")
-  status    TenantStatus @default(ACTIVE)
+  id                    String       @id @default(cuid())
+  name                  String
+  legalName             String?
+  rnc                   String?
+  logoUrl               String?
+  address               String?
+  phone                 String?
+  email                 String?
+  industry              String?
+  timezone              String       @default("America/Santo_Domingo")
+  status                TenantStatus @default(ACTIVE)
   // Contexto de entrenamiento del negocio (servicios, horarios, políticas,
   // FAQs, mensajes...). Estructurado en JSON; ver types/training.types.ts.
-  trainingConfig Json?
+  trainingConfig        Json?
   // Respuestas del onboarding post-registro (mensajes/mes, objetivo, etc.).
   onboarding            Json?
   onboardingCompletedAt DateTime?
   // Config de citas/recordatorios: { reminderEnabled, reminderHoursBefore,
   // reminderMessageTemplate, autoConfirmAI }
-  appointmentSettings Json?
+  appointmentSettings   Json?
   // Notas comerciales internas del SUPER_ADMIN (el tenant nunca las ve)
-  internalNotes    String?
-  createdByAdminId String?
+  internalNotes         String?
+  createdByAdminId      String?
   // Config de llamadas IA: { enabled, minutesPerUser, monthlyMinutesLimit,
   // allowedAgentIds, businessPhoneNumbers } — ver voice.service.ts
-  voiceSettings Json?
+  voiceSettings         Json?
 
   // ── Flujo comercial (verificación → implementación → activación final) ──
   // Default ACTIVE: los tenants existentes no cambian de comportamiento; los
   // self-service nuevos se crean con el estado que corresponda en onboarding.
-  lifecycleStatus TenantLifecycleStatus @default(ACTIVE)
+  lifecycleStatus             TenantLifecycleStatus @default(ACTIVE)
   // Cuando el OWNER verificó su correo (espejo informativo de User.emailVerifiedAt)
-  emailVerifiedAt DateTime?
+  emailVerifiedAt             DateTime?
   // Pago de implementación registrado por SUPER_ADMIN
-  implementationFeePaidAt DateTime?
-  implementationStartedAt DateTime?
+  implementationFeePaidAt     DateTime?
+  implementationStartedAt     DateTime?
   implementationExpectedEndAt DateTime?
   // Activación final fijada por SUPER_ADMIN: desde aquí corre el primer mes
-  finalActivationDate DateTime?
+  finalActivationDate         DateTime?
   // Siempre = finalActivationDate + 1 mes (recalculado al cambiar la fecha)
-  firstMonthEndsAt DateTime?
+  firstMonthEndsAt            DateTime?
   // Bypass temporal del paywall autorizado por SUPER_ADMIN
-  paywallBypassUntil  DateTime?
-  paywallBypassReason String?
+  paywallBypassUntil          DateTime?
+  paywallBypassReason         String?
   // Notas técnicas del equipo de implementación (nunca visibles para el cliente)
   internalImplementationNotes String?
 
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  users                User[]
-  agents               Agent[]
-  conversations        Conversation[]
-  quotes               Quote[]
-  customers            Customer[]
-  products             Product[]
-  subscription         Subscription?
-  cancellationRequests CancellationRequest[]
-  integrations         Integration[]
-  whatsappIntegrations WhatsAppIntegration[]
-  knowledgeDocuments   KnowledgeDocument[]
-  usageMetrics         UsageMetric[]
-  idempotencyKeys      IdempotencyKey[]
-  categories           Category[]
-  appointments         Appointment[]
-  usageCounters        UsageCounter[]
-  voiceUsageCounters   VoiceUsageCounter[]
-  callLogs             CallLog[]
+  users                       User[]
+  agents                      Agent[]
+  conversations               Conversation[]
+  quotes                      Quote[]
+  customers                   Customer[]
+  products                    Product[]
+  subscription                Subscription?
+  cancellationRequests        CancellationRequest[]
+  integrations                Integration[]
+  whatsappIntegrations        WhatsAppIntegration[]
+  knowledgeDocuments          KnowledgeDocument[]
+  usageMetrics                UsageMetric[]
+  idempotencyKeys             IdempotencyKey[]
+  categories                  Category[]
+  customerCategories          CustomerCategory[]
+  customerCategoryAssignments CustomerCategoryAssignment[]
+  appointmentLines            AppointmentLine[]
+  appointments                Appointment[]
+  usageCounters               UsageCounter[]
+  voiceUsageCounters          VoiceUsageCounter[]
+  callLogs                    CallLog[]
+  automationEvents            AutomationEvent[]
+  automationRules             AutomationRule[]
+  automationJobs              AutomationJob[]
+  automationExecutions        AutomationExecution[]
+  scheduledMessages           ScheduledMessage[]
 
   @@index([status])
 }
 
 model User {
-  id           String     @id @default(cuid())
-  tenantId     String?
-  name         String
-  lastName     String?
-  email        String     @unique
+  id                      String       @id @default(cuid())
+  tenantId                String?
+  name                    String
+  lastName                String?
+  email                   String       @unique
   // Opcional: usuarios creados vía Google OAuth no tienen contraseña local.
-  passwordHash String?
-  googleId     String?    @unique
-  authProvider AuthProvider @default(LOCAL)
-  role         UserRole
-  status       UserStatus @default(ACTIVE)
-  lastLoginAt  DateTime?
+  passwordHash            String?
+  googleId                String?      @unique
+  authProvider            AuthProvider @default(LOCAL)
+  role                    UserRole
+  status                  UserStatus   @default(ACTIVE)
+  lastLoginAt             DateTime?
   // Verificación de correo: null = pendiente. Usuarios creados por SUPER_ADMIN
   // o vía Google (email_verified) nacen verificados; los existentes se
   // backfillean para no bloquear a nadie.
   emailVerifiedAt         DateTime?
   emailVerificationSentAt DateTime?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
 
-  tenant                Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sessions              Session[]
-  assignedConversations Conversation[]       @relation("AssignedConversations")
-  cancellationRequests  CancellationRequest[]
-  callLogs              CallLog[]
-  passwordResetTokens   PasswordResetToken[]
+  tenant                  Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sessions                Session[]
+  assignedConversations   Conversation[]           @relation("AssignedConversations")
+  cancellationRequests    CancellationRequest[]
+  callLogs                CallLog[]
+  passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
 
   @@index([tenantId])
@@ -499,50 +644,85 @@ model Plan {
 }
 
 model Subscription {
-  id                 String             @id @default(cuid())
-  tenantId           String             @unique
-  planId             String
-  status             SubscriptionStatus @default(TRIALING)
-  currentPeriodStart DateTime
-  currentPeriodEnd   DateTime
-  cancelRequestedAt  DateTime?
-  cancelledAt        DateTime?
+  id                             String             @id @default(cuid())
+  tenantId                       String             @unique
+  planId                         String
+  status                         SubscriptionStatus @default(TRIALING)
+  currentPeriodStart             DateTime
+  currentPeriodEnd               DateTime
+  cancelRequestedAt              DateTime?
+  cancelledAt                    DateTime?
   // ── Venta manual / plan personalizado (SUPER_ADMIN) ──
-  billingMode   BillingMode   @default(MANUAL)
-  paymentStatus PaymentStatus @default(NOT_REQUIRED)
+  billingMode                    BillingMode        @default(MANUAL)
+  paymentStatus                  PaymentStatus      @default(NOT_REQUIRED)
   // Nombre comercial visible cuando el plan es negociado ("Plan personalizado")
-  customPlanName    String?
-  customMonthlyPrice Decimal? @db.Decimal(10, 2)
-  customSetupFee     Decimal? @db.Decimal(10, 2)
-  nextBillingDate    DateTime?
+  customPlanName                 String?
+  customMonthlyPrice             Decimal?           @db.Decimal(10, 2)
+  customSetupFee                 Decimal?           @db.Decimal(10, 2)
+  nextBillingDate                DateTime?
   // Overrides por tenant (negociados); null usa el valor del plan
-  customMonthlyMessageLimit Int?
-  customMonthlyTokenLimit   Int?
-  customMaxUsers            Int?
-  customMaxAgents           Int?
-  customMaxWhatsappNumbers  Int?
+  customMonthlyMessageLimit      Int?
+  customMonthlyTokenLimit        Int?
+  customMaxUsers                 Int?
+  customMaxAgents                Int?
+  customMaxWhatsappNumbers       Int?
   // Minutos de llamadas IA negociados (Enterprise); null usa usuarios × cuota
-  customVoiceMinutesLimit   Int?
+  customVoiceMinutesLimit        Int?
   // Identificadores de LemonSqueezy (se llenan vía webhook; nunca datos de tarjeta)
-  lemonSqueezyCustomerId     String?
-  lemonSqueezySubscriptionId String?   @unique
-  lemonSqueezyOrderId        String?
-  lemonSqueezyVariantId      String?
-  lemonSqueezyProductId      String?
-  renewsAt                   DateTime?
-  endsAt                     DateTime?
+  lemonSqueezyCustomerId         String?
+  lemonSqueezySubscriptionId     String?            @unique
+  lemonSqueezyOrderId            String?
+  lemonSqueezyVariantId          String?
+  lemonSqueezyProductId          String?
+  renewsAt                       DateTime?
+  endsAt                         DateTime?
   // Último webhook de billing procesado para esta suscripción (auditoría admin)
-  lastWebhookAt              DateTime?
+  lastWebhookAt                  DateTime?
   // Último evento crudo relevante (event_name, test_mode, status LS...)
-  metadataJson               Json?
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  metadataJson                   Json?
+  // ── Snapshot operativo de LemonSqueezy (lo llena SubscriptionSyncService
+  // desde el webhook). NUNCA es fuente de configuración comercial: esa sigue
+  // siendo el Plan interno. Aquí solo hay trazabilidad y soporte.
+  // Las signed URLs (customer_portal, update_payment_method) NO se guardan:
+  // caducan; se piden a la API de LS en el momento de usarlas.
+  lemonSqueezyStoreId            String?
+  lemonSqueezyOrderItemId        String?
+  // Estado CRUDO de LS (active/on_trial/past_due/unpaid/paused/cancelled/expired).
+  // `status` es el estado Sendwary mapeado; este conserva la verdad del proveedor.
+  lemonSqueezyStatus             String?
+  lemonSqueezyProductName        String?
+  lemonSqueezyVariantName        String?
+  lemonSqueezySubscriptionItemId String?
+  lemonSqueezyPriceId            String?
+  lemonSqueezyQuantity           Int?
+  // Marca y últimos 4 dígitos: NO son datos de tarjeta (Sendwary nunca los ve).
+  lemonSqueezyCardBrand          String?
+  lemonSqueezyCardLastFour       String?
+  lemonSqueezyPaymentProcessor   String?
+  lemonSqueezyCancelled          Boolean?
+  lemonSqueezyTrialEndsAt        DateTime?
+  lemonSqueezyBillingAnchor      Int?
+  // Objeto `pause` de LS sanitizado (mode/resumes_at); aún sin lógica propia.
+  lemonSqueezyPauseJson          Json?
+  // true = suscripción de TEST MODE. Separa entitlement de prueba del real.
+  lemonSqueezyTestMode           Boolean?
+  lemonSqueezyCreatedAt          DateTime?
+  lemonSqueezyUpdatedAt          DateTime?
+  // Últimos eventos de pago (distintos de `status`: ver PaymentStatus)
+  lastPaymentAt                  DateTime?
+  lastPaymentFailedAt            DateTime?
+  createdAt                      DateTime           @default(now())
+  updatedAt                      DateTime           @updatedAt
 
   tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   plan                 Plan                  @relation(fields: [planId], references: [id])
   cancellationRequests CancellationRequest[]
 
   @@index([planId])
+  // Correlación de webhooks cuando no llega custom_data (fallback por customer
+  // y por orden). Son consultas reales de SubscriptionSyncService.
+  @@index([lemonSqueezyCustomerId])
+  @@index([lemonSqueezyOrderId])
 }
 
 model CancellationRequest {
@@ -598,28 +778,232 @@ model Agent {
   @@index([whatsappPhoneNumberId])
 }
 
+/// Etapa del contacto dentro del Maestro de Clientes (Módulo 1).
+/// Sendwary NO tiene una tabla separada de "contactos": toda conversación
+/// necesita un Customer. La distinción conceptual contacto ≠ cliente vive aquí:
+/// - CONTACT: alguien escribió por WhatsApp/llamó. Aún no es cliente.
+/// - CLIENT:  evidencia real de relación comercial (cita confirmada, alta
+///            manual del negocio o importación del maestro).
+/// - ARCHIVED: archivado por el negocio (soft delete; nunca se borra la fila
+///            porque cuelgan conversaciones, citas y cotizaciones).
+enum CustomerStage {
+  CONTACT
+  CLIENT
+  ARCHIVED
+}
+
+/// Origen del alta. Sirve para analytics y soporte ("¿de dónde salió?").
+enum CustomerSource {
+  WHATSAPP
+  MANUAL
+  APPOINTMENT
+  IMPORT
+  VOICE
+  API
+}
+
+/// Riesgo de abandono. En esta fase lo fija el negocio a mano (o una futura
+/// regla del motor); Sendwary NO calcula todavía un score predictivo.
+enum CustomerRiskStatus {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+}
+
 model Customer {
-  id        String   @id @default(cuid())
-  tenantId  String
-  name      String?
-  phone     String
-  email     String?
+  id              String    @id @default(cuid())
+  tenantId        String
+  /// Nombre para mostrar. Es el campo legado que usan inbox, cotizaciones,
+  /// PDF y el motor de automatizaciones: se mantiene SIEMPRE sincronizado con
+  /// firstName + lastName cuando esos existen.
+  name            String?
+  firstName       String?
+  lastName        String?
+  phone           String
+  /// Teléfono canónico E.164 (+18095555555). Es la clave real de
+  /// deduplicación. Nullable a propósito: los teléfonos legados que no se
+  /// pueden interpretar quedan en null y PostgreSQL permite varios null en un
+  /// índice único, por lo que ninguna fila existente se pierde ni bloquea.
+  phoneNormalized String?
+  /// País ISO-3166 alpha-2 detectado al normalizar (DO, US, ES...).
+  phoneCountry    String?
+  email           String?
+  /// Documento de identidad (cédula/DNI/pasaporte). Dato sensible: nunca se
+  /// escribe en logs ni en payloads de automatizaciones.
+  documentId      String?
+  address         String?
+  /// Solo fecha (sin hora): un cumpleaños no tiene zona horaria. El motor
+  /// calcula la ocurrencia anual en la zona del tenant (utils/timezone.ts).
+  birthDate       DateTime? @db.Date
   // Notas internas del equipo sobre el contacto (no visibles para el cliente)
-  notes     String?
+  notes           String?
+
+  stage       CustomerStage  @default(CONTACT)
+  source      CustomerSource @default(WHATSAPP)
+  /// Momento en que pasó a CLIENT (cita confirmada, alta manual, importación).
+  clientSince DateTime?
+
+  /// Segmentación por cliente. Eje distinto al de ConversationLabel (que
+  /// etiqueta UNA conversación): aquí la etiqueta describe a la persona.
+  tags String[] @default([])
+
+  isVip      Boolean            @default(false)
+  vipSince   DateTime?
+  riskStatus CustomerRiskStatus @default(NONE)
+
+  /// Métricas de visita DERIVADAS de Appointment(status = COMPLETED).
+  /// No se incrementan a mano: recalculateCustomerVisitStats() las recalcula
+  /// completas desde la fuente de verdad, así nunca quedan a la deriva.
+  /// Se persisten (y no se calculan al vuelo) porque el listado filtra y
+  /// ordena por "sin regresar en X días", que necesita índice.
+  firstVisitAt DateTime?
+  lastVisitAt  DateTime?
+  visitCount   Int       @default(0)
+
   lastActivityAt DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant           Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations    Conversation[]
+  quotes           Quote[]
+  appointments     Appointment[]
+  /// Segmentación relacional (Módulo 2). Sustituye a `tags` como eje
+  /// consultable: `tags` queda como espejo legado de texto libre.
+  categories       CustomerCategoryAssignment[]
+  /// Historial de servicios y productos (Módulo 3).
+  appointmentLines AppointmentLine[]
+
+  @@unique([tenantId, phone])
+  @@unique([tenantId, phoneNormalized])
+  @@index([phone])
+  @@index([tenantId, stage])
+  @@index([tenantId, lastVisitAt])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, isVip])
+  @@index([tenantId, riskStatus])
+  @@index([tenantId, email])
+  @@index([tenantId, lastName])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Módulo 2 — Categorías y segmentación de clientes
+//
+// El modelo `Category` (más arriba) es del CATÁLOGO de productos; no se
+// reutiliza aquí porque clasifica otra cosa. Esta es la segmentación de
+// PERSONAS y es la que sustituye a `Customer.tags` como eje consultable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// MANUAL   → la asigna y la quita una persona del tenant.
+/// AUTOMATIC→ la gestiona el sistema (estado de dominio o Automation Core).
+///            No se puede asignar/quitar a mano: la UI lo explica.
+enum CustomerCategoryType {
+  MANUAL
+  AUTOMATIC
+}
+
+/// No hay borrado físico de categorías que ya estuvieron asignadas: se
+/// archivan para conservar el historial de segmentación.
+enum CustomerCategoryStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+/// Cómo llegó el cliente a la categoría. Permite distinguir un "VIP" puesto a
+/// mano de uno calculado por una regla.
+enum CustomerCategoryAssignmentSource {
+  MANUAL
+  AUTOMATION
+  SYSTEM
+  IMPORT
+  API
+}
+
+/// Categoría de clientes de UN tenant. Nunca hay categorías globales
+/// editables: cada empresa tiene su propia fila "VIP" y no puede tocar la de
+/// otra (mismo criterio que AutomationRule).
+model CustomerCategory {
+  id       String @id @default(cuid())
+  tenantId String
+
+  /// Nombre tal cual lo escribió el negocio ("Coloración", "VIP").
+  name String
+  /// Nombre normalizado (minúsculas, sin acentos, sin espacios dobles).
+  /// Es la clave real de unicidad: "VIP", " vip " y "Vip" son la MISMA
+  /// categoría dentro del tenant, pero dos tenants pueden tener "vip".
+  slug String
+
+  description String?
+
+  type   CustomerCategoryType   @default(MANUAL)
+  status CustomerCategoryStatus @default(ACTIVE)
+
+  /// Color de la insignia (paleta cerrada del design system, no CSS libre).
+  color String @default("purple")
+
+  /// Categoría de sistema: refleja un estado de dominio del Customer y por eso
+  /// no se puede archivar ni cambiar de tipo. Ver `systemKey`.
+  isSystem  Boolean @default(false)
+  /// Identificador estable de la categoría de sistema ("VIP", "CHURN_RISK").
+  /// null en las categorías creadas por el negocio.
+  systemKey String?
+
+  createdByUserId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversations Conversation[]
-  quotes        Quote[]
+  tenant      Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments CustomerCategoryAssignment[]
 
-  @@unique([tenantId, phone])
-  @@index([phone])
+  @@unique([tenantId, slug])
+  @@unique([tenantId, systemKey])
+  @@index([tenantId, status])
+  @@index([tenantId, type])
+}
+
+/// Pertenencia ACTIVA de un cliente a una categoría.
+///
+/// Es una tabla de asignaciones vivas, no un historial: quitar una categoría
+/// borra la fila. La trazabilidad de altas y bajas vive en AutomationEvent
+/// (CUSTOMER_CATEGORY_ASSIGNED / CUSTOMER_CATEGORY_REMOVED), que ya guarda
+/// tenant, entidad, momento y payload — así no se duplica infraestructura de
+/// auditoría ni crece una tabla que nadie consulta.
+///
+/// `tenantId` está denormalizado a propósito: permite acotar por tenant sin
+/// join en los filtros del listado y hace imposible una asignación cruzada
+/// silenciosa (el servicio comprueba que cliente y categoría comparten tenant).
+model CustomerCategoryAssignment {
+  id         String @id @default(cuid())
+  tenantId   String
+  customerId String
+  categoryId String
+
+  source CustomerCategoryAssignmentSource @default(MANUAL)
+  /// Motivo legible ("regla: Reactivación 30 días", "estado VIP del cliente").
+  /// Nunca datos personales ni secretos.
+  reason String?
+
+  assignedAt       DateTime @default(now())
+  assignedByUserId String?
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  category CustomerCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  /// Barrera DURA contra la doble asignación (doble clic, retry del worker,
+  /// dos reglas que asignan lo mismo). La idempotencia del servicio se apoya
+  /// en esta constraint, no al revés.
+  @@unique([customerId, categoryId])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, customerId])
+  @@index([categoryId])
 }
 
 model Conversation {
-  id                 String             @id @default(cuid())
+  id                 String              @id @default(cuid())
   tenantId           String
   agentId            String?
   customerId         String
@@ -627,7 +1011,7 @@ model Conversation {
   customerName       String?
   // Canal de origen: default WHATSAPP preserva todo lo existente
   channel            ConversationChannel @default(WHATSAPP)
-  status             ConversationStatus @default(BOT_ACTIVE)
+  status             ConversationStatus  @default(BOT_ACTIVE)
   assignedToUserId   String?
   lastMessageAt      DateTime?
   lastMessagePreview String?
@@ -635,13 +1019,13 @@ model Conversation {
   lastOutboundAt     DateTime?
   currentQuoteId     String?
   metadata           Json?
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
-  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  agent      Agent?         @relation(fields: [agentId], references: [id], onDelete: SetNull)
-  customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  assignedTo User?          @relation("AssignedConversations", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  tenant       Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent        Agent?                        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  customer     Customer                      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedTo   User?                         @relation("AssignedConversations", fields: [assignedToUserId], references: [id], onDelete: SetNull)
   messages     Message[]
   quotes       Quote[]
   handoffs     HumanHandoff[]
@@ -730,33 +1114,45 @@ model QuoteLine {
 }
 
 model Product {
-  id          String   @id @default(cuid())
-  tenantId    String
-  sku         String?
-  name        String
+  id               String          @id @default(cuid())
+  tenantId         String
+  sku              String?
+  name             String
   // Texto libre legado; la referencia estructurada es categoryId/categoryRef.
-  category    String?
-  categoryId  String?
-  itemType    CatalogItemType @default(PRODUCT)
-  brand       String?
-  description String?
-  unit        String   @default("unidad")
-  price       Decimal  @db.Decimal(12, 2)
+  category         String?
+  categoryId       String?
+  itemType         CatalogItemType @default(PRODUCT)
+  brand            String?
+  description      String?
+  unit             String          @default("unidad")
+  price            Decimal         @db.Decimal(12, 2)
   // ITBIS aplicado al ítem (0.18 = 18%). taxable=false para exentos.
-  taxRate          Decimal @default(0.18) @db.Decimal(5, 4)
-  priceIncludesTax Boolean @default(false)
+  taxRate          Decimal         @default(0.18) @db.Decimal(5, 4)
+  priceIncludesTax Boolean         @default(false)
   // Cantidad disponible; null para servicios (no manejan stock).
-  stock       Int?     @default(0)
-  imageUrl    String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  stock            Int?            @default(0)
+  imageUrl         String?
+  isActive         Boolean         @default(true)
 
-  tenant       Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  categoryRef  Category?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  aliases      ProductAlias[]
-  lines        QuoteLine[]
-  appointments Appointment[]
+  /// ── Recurrencia (Módulo 3) ────────────────────────────────────────────────
+  /// Cada cuánto suele repetirse este servicio (retoque de color, mantenimiento
+  /// de keratina...). Vive en el propio ítem del catálogo, que ya es por
+  /// tenant: no hace falta un modelo aparte para tres campos.
+  /// APAGADA por defecto y SIN intervalo por defecto: Sendwary no fija plazos
+  /// comerciales que el negocio no haya decidido.
+  recurrenceEnabled  Boolean         @default(false)
+  recurrenceInterval Int?
+  recurrenceUnit     RecurrenceUnit?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryRef      Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  aliases          ProductAlias[]
+  lines            QuoteLine[]
+  appointments     Appointment[]
+  appointmentLines AppointmentLine[]
 
   @@unique([tenantId, sku])
   @@index([tenantId])
@@ -791,46 +1187,148 @@ model ProductAlias {
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  @@index([alias])
   @@unique([productId, alias])
+  @@index([alias])
 }
 
 model Appointment {
-  id             String  @id @default(cuid())
-  tenantId       String
-  agentId        String?
-  conversationId String?
-  customerName   String
-  customerPhone  String
-  customerEmail  String?
-  requestedAt    DateTime @default(now())
-  scheduledAt    DateTime
-  serviceOrProduct String
-  catalogItemId  String?
-  notes          String?
+  id                 String                  @id @default(cuid())
+  tenantId           String
+  agentId            String?
+  conversationId     String?
+  /// Contacto del Maestro de Clientes (Módulo 1). Nullable por compatibilidad:
+  /// las citas existentes se vincularon por teléfono normalizado en el
+  /// backfill y las nuevas lo reciben al crearse. customerName/customerPhone
+  /// se conservan como copia histórica de lo que se agendó ese día.
+  customerId         String?
+  customerName       String
+  customerPhone      String
+  customerEmail      String?
+  requestedAt        DateTime                @default(now())
+  scheduledAt        DateTime
+  serviceOrProduct   String
+  catalogItemId      String?
+  notes              String?
   source             AppointmentSource       @default(MANUAL)
   status             AppointmentStatus       @default(PENDING)
   confirmationStatus AppointmentConfirmation @default(UNCONFIRMED)
   priority           AppointmentPriority     @default(NORMAL)
   // Override por cita: { hoursBefore, enabled }; null usa la config del tenant.
-  reminderConfig Json?
-  lastReminderAt DateTime?
-  confirmedAt    DateTime?
-  cancelledAt    DateTime?
-  rescheduledAt  DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  reminderConfig     Json?
+  lastReminderAt     DateTime?
+  confirmedAt        DateTime?
+  cancelledAt        DateTime?
+  rescheduledAt      DateTime?
+  /// Momento en que la cita se cerró como COMPLETED. Es la marca de la VISITA:
+  /// Sendwary NO tiene una tabla de visitas aparte porque una cita completada
+  /// ES la visita (Módulo 3, §6/§9). Su presencia es también la barrera de
+  /// idempotencia del pipeline de cierre: si ya está puesto, completar otra vez
+  /// no vuelve a registrar nada.
+  completedAt        DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
 
-  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
-  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  catalogItem  Product?      @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agent        Agent?            @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  conversation Conversation?     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  catalogItem  Product?          @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  customer     Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// Servicios y productos de la cita (Módulo 3). `serviceOrProduct` y
+  /// `catalogItemId` se conservan: son lo que se agendó y lo que siguen usando
+  /// el inbox, el agente IA y el Excel de citas.
+  lines        AppointmentLine[]
 
   @@index([tenantId])
   @@index([scheduledAt])
   @@index([status])
   @@index([customerPhone])
   @@index([conversationId])
+  // Historial y métricas de visita del cliente
+  @@index([tenantId, customerId, status])
+  // Historial de visitas por fecha real de cierre
+  @@index([tenantId, customerId, completedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Módulo 3 — Historial de servicios, visitas y recurrencias
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Qué representa la línea. Separar VENTA de USO INTERNO es obligatorio: el
+/// champú que se le vende a la clienta es ingreso; el tinte gastado durante la
+/// coloración no lo es y jamás debe emitir PRODUCT_PURCHASED.
+enum AppointmentLineKind {
+  SERVICE
+  PRODUCT_SOLD
+  PRODUCT_USED
+}
+
+/// Un servicio AGENDADO no es un servicio REALIZADO. Al cerrar la cita solo
+/// cuentan las líneas PERFORMED: nunca se inventa una ejecución que no ocurrió.
+enum AppointmentLineStatus {
+  PLANNED
+  PERFORMED
+  SKIPPED
+}
+
+/// Unidad del intervalo de recurrencia. "30 días" y "1 mes" NO son lo mismo,
+/// así que la unidad se guarda aparte del número en vez de normalizar todo a
+/// días.
+enum RecurrenceUnit {
+  DAYS
+  WEEKS
+  MONTHS
+}
+
+/// Línea de una cita: el servicio o producto concreto que se atendió.
+///
+/// Guarda un SNAPSHOT del nombre y del precio del catálogo en el momento de
+/// realizarse. Si mañana "Corte Premium" sube de 800 a 1.200, el historial de
+/// la clienta que pagó 800 sigue diciendo 800: el pasado no se reescribe solo
+/// porque cambie una tarifa.
+model AppointmentLine {
+  id            String  @id @default(cuid())
+  tenantId      String
+  appointmentId String
+  /// Denormalizado desde la cita: permite el historial del cliente sin join y
+  /// sobrevive aunque la cita se reasigne. Se valida contra el mismo tenant.
+  customerId    String?
+
+  kind   AppointmentLineKind   @default(SERVICE)
+  status AppointmentLineStatus @default(PLANNED)
+
+  /// Ítem del catálogo. SetNull: si el negocio borra el servicio, el historial
+  /// no se pierde — se queda con el snapshot.
+  productId String?
+
+  /// Snapshot del catálogo en el momento del cierre (nunca se recalcula).
+  nameSnapshot      String
+  unitPriceSnapshot Decimal @db.Decimal(12, 2)
+  quantity          Int     @default(1)
+  /// unitPriceSnapshot * quantity, congelado por la misma razón.
+  totalSnapshot     Decimal @db.Decimal(12, 2)
+
+  /// Cuándo se realizó de verdad. Solo lo tienen las líneas PERFORMED.
+  performedAt DateTime?
+
+  /// Próxima fecha recomendada según la política de recurrencia del servicio,
+  /// calculada al cerrar la cita. null = ese servicio no tiene recurrencia
+  /// configurada. NO se inventa ningún valor por defecto.
+  nextRecommendedAt DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  customer    Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  product     Product?    @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, appointmentId])
+  @@index([tenantId, customerId, performedAt])
+  @@index([tenantId, productId, performedAt])
+  @@index([appointmentId])
 }
 
 // Etiquetas de conversación (a nivel conversación y no contacto: el mismo
@@ -957,15 +1455,15 @@ model WhatsAppIntegration {
   mode     WhatsAppConnectionMode    @default(MANUAL_CLOUD_API)
   status   WhatsAppIntegrationStatus @default(DRAFT)
 
-  businessName String?
+  businessName       String?
   // DEPRECADO: nombre histórico del WABA ID. Se sigue escribiendo en sincronía
   // con `wabaId` para no romper la config manual ya guardada; leer `wabaId`.
-  businessAccountId String?
+  businessAccountId  String?
   // WABA ID (WhatsApp Business Account) — lo devuelve Embedded Signup.
-  wabaId String?
+  wabaId             String?
   // Meta Business ID (la empresa dueña de la WABA). Distinto del WABA ID;
   // lo devuelve Embedded Signup y lo piden los BSP.
-  businessId String?
+  businessId         String?
   // Nullable desde el modo guiado: una solicitud de conexión asistida existe
   // ANTES de que haya número. Sigue siendo único global (Postgres permite
   // múltiples NULL), así que el lookup del webhook no cambia.
@@ -993,36 +1491,36 @@ model WhatsAppIntegration {
   // un solo uso; se intercambia en el acto y se descarta.
   embeddedSignupCompletedAt DateTime?
   // Cuándo se suscribió la app a los webhooks de la WABA del cliente
-  webhookSubscribedAt DateTime?
+  webhookSubscribedAt       DateTime?
   // Último resultado del health check (para el panel admin sin re-consultar Meta)
-  lastHealthStatus String?
+  lastHealthStatus          String?
 
   // ── Preparación del número (wizard "Preparar número") ──
   // Campos consultables (no JSON) porque el panel admin filtra y ordena por
   // ellos: "qué clientes necesitan número nuevo", "cuáles esperan revisión".
-  numberReadiness WhatsAppNumberReadiness @default(UNKNOWN)
-  readinessStage  WhatsAppReadinessStage?
+  numberReadiness         WhatsAppNumberReadiness @default(UNKNOWN)
+  readinessStage          WhatsAppReadinessStage?
   // Opción que eligió el cliente en el wizard (PERSONAL, BUSINESS_APP, ...)
-  declaredNumberType String?
+  declaredNumberType      String?
   // Número que el cliente DICE querer usar. Solo lo ve el equipo; al ticket
   // de soporte va enmascarado.
-  declaredPhoneNumber String?
+  declaredPhoneNumber     String?
   // Proveedor/BSP donde está hoy el número, si aplica (texto libre)
-  currentProvider String?
+  currentProvider         String?
   // Recomendación que el sistema le dio (para que soporte vea lo mismo que él)
   readinessRecommendation String?
   // Comentarios del cliente en el wizard
-  readinessNotes     String?
-  readinessUpdatedAt DateTime?
+  readinessNotes          String?
+  readinessUpdatedAt      DateTime?
 
   // ── Conexión asistida por el equipo Sendwary (modo EASY_ONBOARDING) ──
   // Campos consultables (no JSON) porque el panel admin filtra y ordena por
   // ellos: "quién pidió ayuda y desde cuándo".
-  assistedSetupRequestedAt     DateTime?
+  assistedSetupRequestedAt       DateTime?
   assistedSetupRequestedByUserId String?
-  assistedSetupStartedAt       DateTime?
+  assistedSetupStartedAt         DateTime?
   // Notas internas del equipo Sendwary (el tenant NUNCA las ve)
-  adminNotes String?
+  adminNotes                     String?
 
   // ── Modo demo (número de Sendwary, solo pruebas) ──
   demoMessagesUsed Int @default(0)
@@ -1066,15 +1564,15 @@ model IdempotencyKey {
 // includedMinutes/extraMinutes NO se persisten: se calculan al leer contra el
 // límite vigente (que puede cambiar a mitad de mes).
 model VoiceUsageCounter {
-  id          String   @id @default(cuid())
-  tenantId    String
-  periodStart DateTime
-  periodEnd   DateTime
-  usedSeconds Int      @default(0)
-  callCount   Int      @default(0)
-  estimatedCostUsd Decimal @default(0) @db.Decimal(10, 4)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String   @id @default(cuid())
+  tenantId         String
+  periodStart      DateTime
+  periodEnd        DateTime
+  usedSeconds      Int      @default(0)
+  callCount        Int      @default(0)
+  estimatedCostUsd Decimal  @default(0) @db.Decimal(10, 4)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -1084,25 +1582,25 @@ model VoiceUsageCounter {
 
 // Registro individual de cada llamada IA (idempotencia por elevenLabsCallId).
 model CallLog {
-  id                       String  @id @default(cuid())
+  id                       String        @id @default(cuid())
   tenantId                 String
   agentId                  String?
   userId                   String?
   conversationId           String?
   elevenLabsConversationId String?
-  elevenLabsCallId         String? @unique
+  elevenLabsCallId         String?       @unique
   direction                CallDirection @default(INBOUND)
   status                   CallStatus    @default(STARTED)
-  startedAt        DateTime  @default(now())
-  endedAt          DateTime?
-  durationSeconds  Int       @default(0)
-  estimatedCostUsd Decimal   @default(0) @db.Decimal(10, 4)
-  customerPhone    String?
-  summary          String?
-  transcript       String?
-  metadata         Json?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  startedAt                DateTime      @default(now())
+  endedAt                  DateTime?
+  durationSeconds          Int           @default(0)
+  estimatedCostUsd         Decimal       @default(0) @db.Decimal(10, 4)
+  customerPhone            String?
+  summary                  String?
+  transcript               String?
+  metadata                 Json?
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
 
   tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   agent        Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
@@ -1118,19 +1616,19 @@ model CallLog {
 // A diferencia de UsageMetric (eventos individuales para dashboard), este es
 // el registro que el enforcement de planes lee en caliente: una sola fila.
 model UsageCounter {
-  id          String   @id @default(cuid())
-  tenantId    String
-  periodStart DateTime
-  periodEnd   DateTime
-  inboundMessages  Int @default(0)
-  outboundMessages Int @default(0)
-  totalMessages    Int @default(0)
-  aiInputTokens    Int @default(0)
-  aiOutputTokens   Int @default(0)
-  aiTotalTokens    Int @default(0)
-  audioTranscriptionSeconds Int @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                        String   @id @default(cuid())
+  tenantId                  String
+  periodStart               DateTime
+  periodEnd                 DateTime
+  inboundMessages           Int      @default(0)
+  outboundMessages          Int      @default(0)
+  totalMessages             Int      @default(0)
+  aiInputTokens             Int      @default(0)
+  aiOutputTokens            Int      @default(0)
+  aiTotalTokens             Int      @default(0)
+  audioTranscriptionSeconds Int      @default(0)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -1231,15 +1729,345 @@ model SupportTicket {
 model SupportAuditLog {
   id              String           @id @default(cuid())
   supportTicketId String?
-  actorType      SupportActorType
+  actorType       SupportActorType
   // id del usuario/admin o etiqueta del agente IA ("support-agent")
-  actorId        String?
-  action         String
-  detailsJson    Json?
-  createdAt      DateTime         @default(now())
+  actorId         String?
+  action          String
+  detailsJson     Json?
+  createdAt       DateTime         @default(now())
 
   ticket SupportTicket? @relation(fields: [supportTicketId], references: [id], onDelete: SetNull)
 
   @@index([supportTicketId])
   @@index([createdAt])
+}
+
+// ─── Automation Core (Módulo 0) ──────────────────────────────────────────────
+// Motor central de eventos → reglas → jobs → ejecuciones. TODA fila lleva
+// tenantId y las consultas del motor SIEMPRE filtran por él. PostgreSQL es la
+// única fuente persistente: no hay cola en memoria ni Redis en el camino
+// crítico (el worker reclama jobs con FOR UPDATE SKIP LOCKED).
+
+/// Catálogo de eventos del motor. Extensible: agregar un valor aquí + su
+/// entrada en services/automation/automation.types.ts es suficiente; el motor
+/// no necesita cambios.
+enum AutomationEventType {
+  APPOINTMENT_CREATED
+  APPOINTMENT_CONFIRMED
+  APPOINTMENT_RESCHEDULED
+  APPOINTMENT_COMPLETED
+  APPOINTMENT_CANCELLED
+  APPOINTMENT_NO_SHOW
+
+  CUSTOMER_CREATED
+  CUSTOMER_VISITED
+
+  SERVICE_USED
+  PRODUCT_PURCHASED
+
+  CUSTOMER_BIRTHDAY
+
+  MAINTENANCE_DUE
+
+  CUSTOMER_INACTIVE_15_DAYS
+  CUSTOMER_INACTIVE_30_DAYS
+  CUSTOMER_INACTIVE_60_DAYS
+  CUSTOMER_INACTIVE_90_DAYS
+
+  CUSTOMER_CHURN_RISK
+  CUSTOMER_BECAME_VIP
+
+  // Módulo 2 — segmentación. Se emiten SOLO cuando la pertenencia cambia de
+  // verdad; una reasignación idempotente no genera evento y por eso una
+  // cadena de reglas de categorías no puede realimentarse indefinidamente.
+  CUSTOMER_CATEGORY_ASSIGNED
+  CUSTOMER_CATEGORY_REMOVED
+}
+
+/// Entidad de negocio sobre la que actúa un job. Se usa para cancelar/
+/// reprogramar secuencias completas (cancelJobsForEntity).
+enum AutomationEntityType {
+  CUSTOMER
+  APPOINTMENT
+  CONVERSATION
+  QUOTE
+  PRODUCT
+  TENANT
+}
+
+enum AutomationRuleStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum AutomationJobStatus {
+  PENDING
+  SCHEDULED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  RETRY_PENDING
+}
+
+enum AutomationExecutionStatus {
+  SUCCESS
+  FAILED
+  RETRY_SCHEDULED
+  SKIPPED
+}
+
+/// Acciones ejecutables. Cada valor DEBE tener un executor registrado en
+/// services/automation/executors/index.ts; la API rechaza reglas cuya acción
+/// no tenga executor (no se declaran acciones que no existen).
+enum AutomationActionType {
+  SEND_WHATSAPP_MESSAGE
+  SEND_EMAIL
+  CREATE_INTERNAL_NOTIFICATION
+  UPDATE_CUSTOMER_TAG
+  // Módulo 2: la segmentación automática NO tiene motor propio — se configura
+  // como cualquier otra regla y estas dos acciones la ejecutan.
+  ASSIGN_CUSTOMER_CATEGORY
+  REMOVE_CUSTOMER_CATEGORY
+}
+
+/// Cómo se calcula scheduledFor a partir del evento.
+/// - IMMEDIATE: ahora mismo.
+/// - DELAY: occurredAt + delayMinutes.
+/// - RELATIVE_TO_FIELD: fecha de un campo del payload ± offsetMinutes
+///   (recordatorios de cita: scheduledAt - 24h).
+/// - DAILY_AT_LOCAL_TIME: occurredAt + delayMinutes, movido a la hora local
+///   del tenant indicada en scheduleConfigJson.localTime ("HH:mm").
+enum AutomationScheduleStrategy {
+  IMMEDIATE
+  DELAY
+  RELATIVE_TO_FIELD
+  DAILY_AT_LOCAL_TIME
+}
+
+enum ScheduledMessageStatus {
+  SCHEDULED
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum ScheduledMessageChannel {
+  WHATSAPP
+  EMAIL
+}
+
+/// Evento recibido por el motor. Sirve para trazabilidad y como segunda
+/// barrera de idempotencia a nivel de EVENTO (el webhook duplicado ni siquiera
+/// vuelve a evaluar reglas). El payload NUNCA contiene secretos.
+model AutomationEvent {
+  id             String                @id @default(cuid())
+  tenantId       String
+  type           AutomationEventType
+  source         String
+  entityType     AutomationEntityType?
+  entityId       String?
+  occurredAt     DateTime              @default(now())
+  payloadJson    Json?
+  correlationId  String?
+  causationId    String?
+  /// Clave de deduplicación del evento (única por tenant cuando existe).
+  idempotencyKey String?
+  /// Reglas que hicieron match y jobs efectivamente creados/actualizados.
+  matchedRules   Int                   @default(0)
+  createdJobs    Int                   @default(0)
+  createdAt      DateTime              @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, type, occurredAt])
+  @@index([tenantId, entityType, entityId])
+  @@index([correlationId])
+}
+
+/// Automatización configurable de un tenant. NO existen reglas globales en BD:
+/// las plantillas de Sendwary viven en código (automation-templates.ts) y se
+/// instancian por tenant, de modo que jamás puede editarse la regla de otro.
+model AutomationRule {
+  id          String               @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  eventType   AutomationEventType
+  status      AutomationRuleStatus @default(DRAFT)
+  enabled     Boolean              @default(true)
+
+  /// DSL de condiciones (all/any/not + field/op/value). null = siempre aplica.
+  conditionsJson Json?
+
+  actionType       AutomationActionType
+  /// Configuración de la acción (plantilla de texto, asunto, etiqueta...).
+  /// NUNCA debe contener tokens ni credenciales: el executor las resuelve.
+  actionConfigJson Json?
+
+  scheduleStrategy   AutomationScheduleStrategy @default(DELAY)
+  delayMinutes       Int                        @default(0)
+  /// { field, offsetMinutes, localTime, dedupeWindow } según la estrategia.
+  scheduleConfigJson Json?
+
+  /// Eventos que CANCELAN los jobs pendientes de esta regla para la misma
+  /// entidad (ej. CUSTOMER_VISITED cancela el seguimiento de 30/60/90 días).
+  cancelOnEventTypes AutomationEventType[] @default([])
+
+  /// Mayor = se ejecuta antes cuando varios jobs vencen a la vez.
+  priority    Int     @default(0)
+  maxAttempts Int?
+  /// Clave de la plantilla de origen (si se instanció desde una plantilla).
+  templateKey String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+
+  tenant     Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  jobs       AutomationJob[]
+  executions AutomationExecution[]
+
+  @@unique([tenantId, templateKey])
+  @@index([tenantId, status])
+  @@index([tenantId, eventType, status])
+}
+
+/// Ejecución futura o pendiente derivada de una regla.
+/// La unicidad [tenantId, idempotencyKey] es la garantía dura contra
+/// duplicados (webhook repetido, retry, doble instancia del worker).
+model AutomationJob {
+  id               String @id @default(cuid())
+  tenantId         String
+  automationRuleId String
+
+  eventType  AutomationEventType
+  entityType AutomationEntityType
+  entityId   String
+  /// Cliente destinatario (cuando aplica): permite cancelar por contacto.
+  customerId String?
+
+  actionType AutomationActionType
+
+  scheduledFor DateTime
+  status       AutomationJobStatus @default(SCHEDULED)
+  priority     Int                 @default(0)
+
+  attemptCount Int @default(0)
+  maxAttempts  Int @default(5)
+
+  /// Lease del worker: si lockedAt envejece más que el timeout, otro worker
+  /// puede recuperar el job (evita PROCESSING eterno).
+  lockedAt DateTime?
+  lockedBy String?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  failedAt    DateTime?
+  cancelledAt DateTime?
+
+  /// Mensaje de error YA sanitizado (sin tokens ni headers).
+  lastError     String?
+  lastErrorCode String?
+  cancelReason  String?
+
+  idempotencyKey String
+  /// Datos mínimos para ejecutar la acción. Sin secretos.
+  payloadJson    Json?
+  correlationId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant            Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rule              AutomationRule        @relation(fields: [automationRuleId], references: [id], onDelete: Cascade)
+  executions        AutomationExecution[]
+  scheduledMessages ScheduledMessage[]
+
+  @@unique([tenantId, idempotencyKey])
+  // Consulta del worker (claim) y de la UI de jobs por estado/fecha.
+  @@index([status, scheduledFor])
+  @@index([tenantId, status, scheduledFor])
+  // Cancelación/reprogramación de secuencias por entidad.
+  @@index([tenantId, entityType, entityId, status])
+  @@index([tenantId, customerId, status])
+  @@index([automationRuleId])
+  // Recuperación de jobs abandonados (lease vencido).
+  @@index([lockedAt])
+}
+
+/// Historial real de cada intento. Nunca guarda secretos: los errores externos
+/// se sanitizan antes de persistirse.
+model AutomationExecution {
+  id       String @id @default(cuid())
+  tenantId String
+  jobId    String
+  ruleId   String
+
+  attemptNumber Int
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  status        AutomationExecutionStatus
+  resultSummary String?
+  errorType     String?
+  errorMessage  String?
+  durationMs    Int?
+  correlationId String?
+
+  createdAt DateTime @default(now())
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  job    AutomationJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([jobId])
+  @@index([ruleId])
+  @@index([tenantId, status])
+}
+
+/// Mensaje programado (outbox). El CONTENIDO se renderiza al momento del envío
+/// a partir de la plantilla de la regla: aquí solo se guarda el destino y el
+/// estado, para no persistir datos del cliente más de lo necesario.
+model ScheduledMessage {
+  id              String  @id @default(cuid())
+  tenantId        String
+  automationJobId String?
+
+  customerId     String?
+  conversationId String?
+  agentId        String?
+
+  channel     ScheduledMessageChannel @default(WHATSAPP)
+  templateKey String?
+  /// Destino ya resuelto (teléfono E.164 o email). Nunca un token.
+  destination String?
+
+  scheduledFor DateTime
+  status       ScheduledMessageStatus @default(SCHEDULED)
+
+  attemptCount Int       @default(0)
+  sentAt       DateTime?
+  failedAt     DateTime?
+  cancelledAt  DateTime?
+  lastError    String?
+
+  /// Deduplicación del outbox (== idempotencyKey del job que lo originó).
+  dedupeKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  job    AutomationJob? @relation(fields: [automationJobId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, dedupeKey])
+  @@index([tenantId, status, scheduledFor])
+  @@index([tenantId, customerId])
+  @@index([automationJobId])
 }
