@@ -1,0 +1,25 @@
+{
+  // Typecheck de lo que el tsconfig principal NO mira: pruebas, scripts
+  // operativos, seed y configuración de Prisma.
+  //
+  // El tsconfig de la API tiene `rootDir: ./src` y `include: ["src"]`, así que
+  // un error de tipos en una prueba o en un backfill era invisible hasta
+  // ejecutarlo. Ver docs/qa/QA_INITIAL_AUDIT.md (riesgo R9).
+  //
+  // No emite nada: solo verifica (`npm run typecheck:test`).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Estos archivos viven fuera de src/, así que no puede haber rootDir.
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": [
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "prisma/seed.ts",
+    "prisma.config.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
