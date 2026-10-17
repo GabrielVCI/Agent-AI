@@ -473,30 +473,37 @@ export async function handleIncomingWhatsappAudioMessage(input: {
  *    tenant. Cubre al cliente que conectó su número (o se lo conectamos en
  *    modo guiado) pero aún no ejecutó el paso de "asignar agente": antes esos
  *    mensajes se perdían en silencio.
- * Nunca cruza tenants: el phoneNumberId es único global en ambas tablas.
+ * Nunca cruza tenants: si el número tiene integración, SOLO puede atenderlo
+ * un agente del tenant dueño de esa integración (phoneNumberId es único global
+ * en WhatsAppIntegration, pero NO en Agent: un agente de otra empresa con el
+ * mismo valor se ignora). Sin integración (legacy/token global) se usa el
+ * agente más antiguo con ese número, de forma determinista.
  */
 export async function resolveAgentByPhoneNumberId(
   phoneNumberId: string
 ): Promise<{ tenantId: string; agentId: string; agent: any } | null> {
   if (!phoneNumberId) return null;
 
+  const integration = await prisma.whatsAppIntegration.findUnique({
+    where: { phoneNumberId },
+    select: { tenantId: true, status: true },
+  });
+
   const agent = await prisma.agent.findFirst({
     where: {
       whatsappPhoneNumberId: phoneNumberId,
       status: "ACTIVE",
       tenant: { status: "ACTIVE" },
+      ...(integration ? { tenantId: integration.tenantId } : {}),
     },
     include: { tenant: true },
+    orderBy: { createdAt: "asc" },
   });
 
   if (agent) {
     return { tenantId: agent.tenantId, agentId: agent.id, agent };
   }
 
-  const integration = await prisma.whatsAppIntegration.findUnique({
-    where: { phoneNumberId },
-    select: { tenantId: true, status: true },
-  });
   if (!integration || integration.status !== "CONNECTED") return null;
 
   const fallbackAgent = await prisma.agent.findFirst({

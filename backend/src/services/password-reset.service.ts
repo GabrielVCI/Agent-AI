@@ -5,6 +5,7 @@ import { generateToken, hashToken } from "../lib/crypto.js";
 import { hashPassword, logoutAllSessions } from "./auth.service.js";
 import { sendPasswordResetEmail } from "./email.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { findUserByEmail } from "./user-lookup.service.js";
 
 /**
  * Recuperación de contraseña (Parte G).
@@ -32,8 +33,7 @@ export function buildResetUrl(token: string): string {
  * controller responde genérico sin importar el resultado.
  */
 export async function requestPasswordReset(rawEmail: string): Promise<void> {
-  const email = rawEmail.toLowerCase().trim();
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await findUserByEmail(rawEmail);
 
   // Correo inexistente o cuenta deshabilitada: mismo silencio hacia afuera.
   if (!user || user.status === "DISABLED") {

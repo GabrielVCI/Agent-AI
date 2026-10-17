@@ -88,7 +88,8 @@ function toPrismaData(dto: UpdateAgentDto): AgentWriteData {
   if (dto.basePrompt !== undefined) data.systemPrompt = dto.basePrompt;
   if (dto.tone !== undefined) data.tone = dto.tone;
   if (dto.whatsappNumber !== undefined) data.whatsappDisplayPhone = dto.whatsappNumber;
-  if (dto.whatsappPhoneNumberId !== undefined) data.whatsappPhoneNumberId = dto.whatsappPhoneNumberId;
+  if (dto.whatsappPhoneNumberId !== undefined)
+    data.whatsappPhoneNumberId = dto.whatsappPhoneNumberId.trim() || null;
   if (dto.aiModel !== undefined) data.openAiModel = dto.aiModel;
   if (dto.allowAudio !== undefined) data.allowAudioMessages = dto.allowAudio;
   if (dto.allowHumanIntervention !== undefined) data.allowHumanHandoff = dto.allowHumanIntervention;
@@ -199,6 +200,36 @@ async function getAgentRecord(agentId: string, tenantId: string): Promise<AgentR
   return agent;
 }
 
+/**
+ * Un agente solo puede usar un número de WhatsApp de SU empresa: el mismo
+ * criterio que `assignAgentToWhatsApp` (el phoneNumberId debe ser de una
+ * WhatsAppIntegration del tenant). Sin esto, un tenant podía ponerle a su
+ * agente el número de otro y el webhook le entregaba sus mensajes.
+ *
+ * Si el agente ya tenía ese valor se acepta: el panel lo reenvía en cada
+ * guardado y hay agentes legacy (token global) sin integración.
+ * El mensaje no distingue "no existe" de "es de otra empresa" a propósito.
+ */
+async function assertPhoneNumberBelongsToTenant(
+  tenantId: string,
+  phoneNumberId: string,
+  currentValue: string | null
+): Promise<void> {
+  const value = phoneNumberId.trim();
+  if (!value || value === currentValue) return;
+
+  const integration = await prisma.whatsAppIntegration.findUnique({
+    where: { phoneNumberId: value },
+    select: { tenantId: true },
+  });
+  if (!integration || integration.tenantId !== tenantId) {
+    throw new AppError(
+      "Ese número de WhatsApp no está conectado en tu empresa. Conéctalo en Canales → WhatsApp antes de asignarlo a un agente.",
+      400
+    );
+  }
+}
+
 export async function getAgent(agentId: string, tenantId: string) {
   const agent = await getAgentRecord(agentId, tenantId);
   const statsMap = await getAgentStatsMap(tenantId);
@@ -206,6 +237,9 @@ export async function getAgent(agentId: string, tenantId: string) {
 }
 
 export async function createAgent(tenantId: string, data: CreateAgentDto) {
+  if (data.whatsappPhoneNumberId !== undefined) {
+    await assertPhoneNumberBelongsToTenant(tenantId, data.whatsappPhoneNumberId, null);
+  }
   const mapped = toPrismaData(data);
 
   const agent = await prisma.agent.create({
@@ -223,7 +257,14 @@ export async function createAgent(tenantId: string, data: CreateAgentDto) {
 }
 
 export async function updateAgent(agentId: string, tenantId: string, data: UpdateAgentDto) {
-  await getAgentRecord(agentId, tenantId);
+  const current = await getAgentRecord(agentId, tenantId);
+  if (data.whatsappPhoneNumberId !== undefined) {
+    await assertPhoneNumberBelongsToTenant(
+      tenantId,
+      data.whatsappPhoneNumberId,
+      current.whatsappPhoneNumberId
+    );
+  }
 
   const agent = await prisma.agent.update({
     where: { id: agentId },

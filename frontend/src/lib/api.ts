@@ -20,22 +20,40 @@ type ApiEnvelope<T> = {
   errors?: Record<string, string[] | string>
 }
 
+/** Errores de campo del backend: `errors` legacy o `error.details.fieldErrors`. */
+function fieldErrorsFrom(
+  body: ApiEnvelope<unknown> | null,
+  errorObj: { details?: Record<string, unknown> } | null
+): Record<string, string[] | string> | undefined {
+  if (body?.errors) return body.errors
+  const nested = errorObj?.details?.fieldErrors
+  return nested ? (nested as Record<string, string[] | string>) : undefined
+}
+
 export class ApiError extends Error {
   statusCode?: number
   /** Código estable del backend (INVALID_CREDENTIALS, FORBIDDEN...). */
   code?: string
   fieldErrors?: Record<string, string[] | string>
+  /**
+   * Datos estructurados y SEGUROS que acompañan al error
+   * (`error.details` del backend). Ej.: el 409 de teléfono repetido manda
+   * `{ duplicate, customerId, customerName }` para poder ofrecer "ver ficha".
+   */
+  details?: Record<string, unknown>
   constructor(
     message: string,
     statusCode?: number,
     fieldErrors?: Record<string, string[] | string>,
-    code?: string
+    code?: string,
+    details?: Record<string, unknown>
   ) {
     super(message)
     this.name = 'ApiError'
     this.statusCode = statusCode
     this.fieldErrors = fieldErrors
     this.code = code
+    this.details = details
   }
 }
 
@@ -102,7 +120,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       (typeof body?.error === 'string' ? body.error : '') ||
       flattenFieldErrors(body?.errors) ||
       friendlyMessageForStatus(response.status)
-    throw new ApiError(message, response.status, body?.errors, errorObj?.code)
+    throw new ApiError(
+      message,
+      response.status,
+      fieldErrorsFrom(body, errorObj),
+      errorObj?.code,
+      errorObj?.details
+    )
   }
 
   // 2xx pero el backend marcó success:false (siempre revisamos el sobre).
@@ -114,7 +138,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       (typeof body.error === 'string' ? body.error : '') ||
       flattenFieldErrors(body.errors) ||
       'La operación no fue exitosa'
-    throw new ApiError(message, response.status, body.errors, errorObj?.code)
+    throw new ApiError(
+      message,
+      response.status,
+      fieldErrorsFrom(body, errorObj),
+      errorObj?.code,
+      errorObj?.details
+    )
   }
 
   // Desenvolvemos el sobre: el consumidor recibe directamente `data`.

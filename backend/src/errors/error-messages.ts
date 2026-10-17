@@ -23,6 +23,19 @@ export const USER_MESSAGES: Record<ErrorCode, string> = {
   RATE_LIMIT_EXCEEDED: "Demasiadas solicitudes. Intenta nuevamente en unos minutos.",
   BILLING_LIMIT_REACHED: "Tu plan alcanzó el límite mensual. Revisa tu suscripción o contacta soporte.",
   SERVICE_NOT_CONFIGURED: "Este servicio no está disponible en este momento.",
+  LEMON_CONFIGURATION_ERROR:
+    "Los pagos en línea aún no están disponibles. Contacta a soporte para activar tu plan.",
+  LEMON_AUTH_ERROR: "No pudimos iniciar el proceso de pago. Intenta nuevamente en unos minutos.",
+  LEMON_API_ERROR: "No pudimos iniciar el proceso de pago. Intenta nuevamente en unos minutos.",
+  LEMON_RATE_LIMITED: "Hay demasiadas solicitudes de pago. Intenta nuevamente en unos minutos.",
+  LEMON_VALIDATION_ERROR: "No pudimos iniciar el proceso de pago. Intenta nuevamente.",
+  INVALID_WEBHOOK_SIGNATURE: "No pudimos verificar el origen de la notificación.",
+  DUPLICATE_WEBHOOK: "Esta notificación ya fue procesada.",
+  SUBSCRIPTION_NOT_FOUND: "No encontramos una suscripción activa para tu empresa.",
+  PLAN_NOT_CONFIGURED:
+    "Este plan aún no está disponible para pago en línea. Contacta a soporte.",
+  CHECKOUT_CREATION_FAILED:
+    "No pudimos iniciar el proceso de pago. Intenta nuevamente.",
   EMAIL_PROVIDER_NOT_CONFIGURED:
     "No pudimos enviar el correo en este momento. Intenta nuevamente.",
   EMAIL_SEND_FAILED: "No pudimos enviar el correo en este momento. Intenta nuevamente.",

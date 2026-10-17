@@ -3,6 +3,7 @@ import { env } from "../config/env.js";
 import { logger } from "../config/logger.js";
 import { generateToken, hashToken } from "../lib/crypto.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import { findUserByEmail } from "./user-lookup.service.js";
 import {
   sendWelcomeVerificationEmail,
   sendImplementationNextStepEmail,
@@ -85,7 +86,7 @@ export async function resendVerificationEmail(input: {
   const user = input.userId
     ? await prisma.user.findUnique({ where: { id: input.userId } })
     : input.email
-      ? await prisma.user.findUnique({ where: { email: input.email.toLowerCase().trim() } })
+      ? await findUserByEmail(input.email)
       : null;
 
   if (!user || user.status === "DISABLED" || user.emailVerifiedAt) {

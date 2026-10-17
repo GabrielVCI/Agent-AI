@@ -22,9 +22,15 @@ playbook en el mismo cambio. Ver `FEATURE_RELEASE_CHECKLIST.md`.
 | [catalog.md](support-playbooks/catalog.md) | Catálogo | T1 | Bajo | ✅ Completo | Gabriel |
 | [appointments.md](support-playbooks/appointments.md) | Citas (incluye Excel) | T1 | Bajo-Medio | ✅ Completo | Gabriel |
 | [billing.md](support-playbooks/billing.md) | Billing/planes | T1/T2 | Alto | ✅ Completo | Gabriel |
-| [lemonsqueezy.md](support-playbooks/lemonsqueezy.md) | Pagos | T2 | Alto | ✅ Completo (feature 🟡: sin credenciales) | Gabriel |
+| [lemonsqueezy.md](support-playbooks/lemonsqueezy.md) | Pagos | T2 | Alto | ✅ Completo — overlay + webhooks idempotentes (feature 🟡: sin credenciales) | Gabriel |
 | [elevenlabs.md](support-playbooks/elevenlabs.md) | Voz/Audio | T1/T2 | Medio | ✅ Completo (feature 🟡: sin key real) | Gabriel |
 | [voice-minutes.md](support-playbooks/voice-minutes.md) | Voz | T1 | Medio | ✅ Completo | Gabriel |
+| [automations.md](support-playbooks/automations.md) | Automatizaciones (Módulo 0) | T2 | Medio | ✅ Completo | Gabriel |
+| [automations-panel.md](support-playbooks/automations-panel.md) | Panel de automatizaciones (UI) | T1 | Alto | ✅ Completo | Gabriel |
+| [customers.md](support-playbooks/customers.md) | Maestro de Clientes (Módulo 1) | T1 | Medio | ✅ Completo | Gabriel |
+| [customer-categories.md](support-playbooks/customer-categories.md) | Categorías y segmentación (Módulo 2) | T1 | Bajo | ✅ Completo | Gabriel |
+| [service-history.md](support-playbooks/service-history.md) | Historial de servicios y recurrencias (Módulo 3) | T1/T2 | Medio | ✅ Completo | Gabriel |
+| [maintenance.md](support-playbooks/maintenance.md) | Cronograma de mantenimiento (Módulo 4) | T1 | Bajo | ✅ Completo | Gabriel |
 | [database.md](support-playbooks/database.md) | Infraestructura | T3 | Crítico | ✅ Completo | Gabriel |
 | [deployment.md](support-playbooks/deployment.md) | Infraestructura | T3 | Alto | ✅ Completo (deploy real ⏳) | Gabriel |
 | [incidents.md](support-playbooks/incidents.md) | Incidentes | T3 | Crítico | ✅ Completo | Gabriel |

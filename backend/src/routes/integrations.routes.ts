@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isLemonSqueezyConfigured } from "../services/billing/lemon-squeezy/lemonSqueezy.config.js";
 import type { Request, Response, NextFunction } from "express";
 import { prisma } from "../config/prisma.js";
 import { env } from "../config/env.js";
@@ -102,7 +103,9 @@ async function listIntegrationsController(req: Request, res: Response, next: Nex
         id: "lemonsqueezy",
         name: "LemonSqueezy (facturación)",
         description: "Cobros y suscripciones del plan de tu empresa.",
-        status: !env.LEMONSQUEEZY_API_KEY
+        // "Configurado" = hay API key Y store: sin store no se puede crear un
+        // checkout. La comprobación vive en lemonSqueezy.config (única fuente).
+        status: !isLemonSqueezyConfigured()
           ? "COMING_SOON"
           : subscription
             ? "CONFIGURED"

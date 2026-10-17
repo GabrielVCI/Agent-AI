@@ -10,7 +10,7 @@ import {
   updateConversationLastMessage,
 } from "../services/conversation.service.js";
 import { sendWhatsappTextMessage } from "../services/meta-whatsapp.service.js";
-import { resolveSendCredentials } from "../services/whatsapp-integration.service.js";
+import { resolveSendCredentialsForTenant } from "../services/whatsapp-integration.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { logger } from "../config/logger.js";
 import { bumpUsage } from "../services/billing.service.js";
@@ -217,7 +217,9 @@ export async function getConversationMessagesController(
       return;
     }
 
-    const messages = await getConversationHistory(conversation.id);
+    // El Inbox muestra una ventana amplia del hilo (los últimos 200); el
+    // runtime de la IA usa el default corto.
+    const messages = await getConversationHistory(conversation.id, 200);
     // Estado de transcripción de audios (vive en metadata) expuesto plano para
     // el panel. mediaUrl nunca lleva URLs temporales de Meta (no se persisten).
     const data = messages.map((m) => {
@@ -334,11 +336,14 @@ export async function replyToConversationController(
 
     // Send via WhatsApp if we have the phone and a phoneNumberId
     if (conversation.whatsappPhone && conversation.agent?.whatsappPhoneNumberId) {
-      // Token del tenant (integración propia) o fallback global si está permitido
-      const credentials = await resolveSendCredentials(
+      // Token del tenant (integración propia) o fallback global si está
+      // permitido. Nunca el de otra empresa: si el número del agente es ajeno,
+      // el mensaje queda guardado pero no se envía.
+      const { allowed, credentials } = await resolveSendCredentialsForTenant(
+        req.tenantId,
         conversation.agent.whatsappPhoneNumberId
       );
-      await sendWhatsappTextMessage({
+      if (allowed) await sendWhatsappTextMessage({
         to: conversation.whatsappPhone,
         text: parsed.data.message,
         phoneNumberId: conversation.agent.whatsappPhoneNumberId,

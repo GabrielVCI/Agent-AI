@@ -21,6 +21,25 @@ export const ERROR_CODES = {
   RATE_LIMIT_EXCEEDED: 429,
   BILLING_LIMIT_REACHED: 402,
   SERVICE_NOT_CONFIGURED: 503,
+  // ── Billing / LemonSqueezy ──
+  // El proveedor no está configurado en este ambiente (falta API key/store/variant).
+  LEMON_CONFIGURATION_ERROR: 503,
+  // Nuestra API key fue rechazada por LemonSqueezy (401/403). Es culpa NUESTRA,
+  // no del usuario: por eso 502 y no 401 (el usuario sí está autenticado).
+  LEMON_AUTH_ERROR: 502,
+  // Fallo genérico/temporal del proveedor (5xx, timeout, red).
+  LEMON_API_ERROR: 502,
+  LEMON_RATE_LIMITED: 429,
+  // LemonSqueezy rechazó el payload (422): datos de checkout inválidos.
+  LEMON_VALIDATION_ERROR: 502,
+  // Webhook firmado mal o sin firma: nunca se procesa.
+  INVALID_WEBHOOK_SIGNATURE: 401,
+  // Evento ya procesado. No es un fallo del proveedor: el webhook responde 200.
+  DUPLICATE_WEBHOOK: 409,
+  SUBSCRIPTION_NOT_FOUND: 404,
+  // El plan existe pero no tiene variante/producto de LemonSqueezy asociado.
+  PLAN_NOT_CONFIGURED: 503,
+  CHECKOUT_CREATION_FAILED: 502,
   // Correo transaccional (Resend/SMTP)
   EMAIL_PROVIDER_NOT_CONFIGURED: 503,
   EMAIL_SEND_FAILED: 502,

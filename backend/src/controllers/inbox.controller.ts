@@ -7,6 +7,7 @@ import {
   assignConversation,
   unassignConversation,
 } from "../services/conversation.service.js";
+import { splitFullName } from "../services/customer/customer-names.js";
 
 /**
  * Endpoints del Inbox profesional: etiquetas, asignación y perfil de contacto.
@@ -168,9 +169,19 @@ export async function conversationProfileController(
     });
     if (!conversation) throw new AppError("Conversación no encontrada", 404);
 
-    // Citas del contacto (por teléfono, cubre citas de otras conversaciones)
+    // Citas del contacto: por vínculo del Maestro de Clientes y, para las
+    // citas antiguas todavía sin vincular, por teléfono.
     const appointments = await prisma.appointment.findMany({
-      where: { tenantId, customerPhone: conversation.customer.phone },
+      where: {
+        tenantId,
+        OR: [
+          { customerId: conversation.customerId },
+          { customerPhone: conversation.customer.phone },
+          ...(conversation.customer.phoneNormalized
+            ? [{ customerPhone: conversation.customer.phoneNormalized }]
+            : []),
+        ],
+      },
       orderBy: { scheduledAt: "desc" },
       take: 5,
       select: {
@@ -247,10 +258,17 @@ export async function updateContactController(req: Request, res: Response, next:
     });
     if (!conversation) throw new AppError("Conversación no encontrada", 404);
 
+    // Renombrar desde el inbox debe reflejarse en el Maestro de Clientes, que
+    // muestra el nombre estructurado: si solo se tocara `name`, la ficha
+    // seguiría enseñando el firstName/lastName viejo.
+    const renamed =
+      parsed.data.name !== undefined ? splitFullName(parsed.data.name) : null;
+
     const customer = await prisma.customer.update({
       where: { id: conversation.customerId },
       data: {
         ...(parsed.data.name !== undefined ? { name: parsed.data.name.trim() } : {}),
+        ...(renamed ? { firstName: renamed.firstName, lastName: renamed.lastName } : {}),
         ...(parsed.data.email !== undefined ? { email: parsed.data.email } : {}),
         ...(parsed.data.notes !== undefined ? { notes: parsed.data.notes } : {}),
       },

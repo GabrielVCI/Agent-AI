@@ -124,6 +124,14 @@ const envSchema = z.object({
   LEMONSQUEEZY_API_KEY: z.string().optional(),
   LEMONSQUEEZY_STORE_ID: z.string().optional(),
   LEMONSQUEEZY_WEBHOOK_SECRET: z.string().optional(),
+  // Base de la API. Configurable SOLO para apuntar a un doble en pruebas.
+  LEMONSQUEEZY_API_URL: z.string().url().default("https://api.lemonsqueezy.com"),
+  // Ambiente declarado (informativo/auditoría). La verdad sobre si una
+  // suscripción es de prueba la da `test_mode` del propio evento de LS.
+  LEMONSQUEEZY_TEST_MODE: z
+    .string()
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
   LEMONSQUEEZY_BASIC_VARIANT_ID: z.string().optional(),
   LEMONSQUEEZY_PRO_VARIANT_ID: z.string().optional(),
   LEMONSQUEEZY_ENTERPRISE_VARIANT_ID: z.string().optional(),
@@ -191,6 +199,37 @@ const envSchema = z.object({
     .transform((v) => v === "true" || v === "1"),
 
   LOG_LEVEL: z.enum(["error", "warn", "info", "debug"]).default("info"),
+
+  // ── Motor de automatizaciones (Módulo 0) ──
+  // El worker corre DENTRO del proceso del backend y reclama jobs de
+  // PostgreSQL con FOR UPDATE SKIP LOCKED: varias instancias de Railway pueden
+  // tenerlo encendido a la vez sin ejecutar el mismo job dos veces.
+  AUTOMATION_WORKER_ENABLED: z
+    .string()
+    .default("true")
+    .transform((v) => v !== "false" && v !== "0"),
+  /** Jobs reclamados por ciclo (backpressure: nunca se procesa todo de golpe). */
+  AUTOMATION_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(50),
+  /** Jobs ejecutados en paralelo dentro de un lote. */
+  AUTOMATION_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
+  AUTOMATION_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).default(5000),
+  /** Lease del worker: pasado este tiempo un job en PROCESSING se recupera. */
+  AUTOMATION_JOB_LEASE_MS: z.coerce.number().int().min(30_000).default(5 * 60 * 1000),
+  /** Intentos máximos por job cuando la regla no define uno propio. */
+  AUTOMATION_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+
+  // ── Maestro de Clientes (Módulo 1) ──
+  /**
+   * País (ISO-3166 alpha-2) que se asume al normalizar un teléfono SIN código
+   * internacional y cuya empresa no tiene una zona horaria reconocible.
+   * Primero manda Tenant.timezone; esto es solo el último recurso, y existe
+   * para no dejar República Dominicana grabada a fuego en el dominio.
+   */
+  DEFAULT_PHONE_COUNTRY: z
+    .string()
+    .length(2, "DEFAULT_PHONE_COUNTRY debe ser un código ISO de 2 letras (DO, US, ES...)")
+    .default("DO")
+    .transform((v) => v.toUpperCase()),
 
   // ── Asistente IA de soporte ──
   // Token interno para que el agente de soporte (proceso externo) consuma

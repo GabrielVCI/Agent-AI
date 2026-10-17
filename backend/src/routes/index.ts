@@ -16,9 +16,14 @@ import { onboardingRoutes } from "./onboarding.routes.js";
 import { appointmentRoutes } from "./appointment.routes.js";
 import { knowledgeRoutes } from "./knowledge.routes.js";
 import { billingRoutes } from "./billing.routes.js";
+import { webhookRoutes } from "./webhooks.routes.js";
 import { voiceRoutes } from "./voice.routes.js";
 import { integrationsRoutes } from "./integrations.routes.js";
 import { supportRoutes } from "./support.routes.js";
+import { automationRoutes } from "./automation.routes.js";
+import { customerRoutes } from "./customer.routes.js";
+import { customerCategoryRoutes } from "./customer-category.routes.js";
+import { maintenanceRoutes } from "./maintenance.routes.js";
 
 export const router = Router();
 
@@ -42,9 +47,15 @@ router.use("/api/onboarding", onboardingRoutes);
 router.use("/api/appointments", appointmentRoutes);
 router.use("/api/knowledge", knowledgeRoutes);
 router.use("/api/billing", billingRoutes);
+// Webhooks de proveedores externos (autenticados por firma, no por sesión)
+router.use("/api/webhooks", webhookRoutes);
 router.use("/api/voice", voiceRoutes);
 router.use("/api/integrations", integrationsRoutes);
 router.use("/api/support", supportRoutes);
+router.use("/api/automations", automationRoutes);
+router.use("/api/customers", customerRoutes);
+router.use("/api/customer-categories", customerCategoryRoutes);
+router.use("/api/maintenance", maintenanceRoutes);
 
 // SUPER_ADMIN only
 router.use("/api/admin", adminRoutes);

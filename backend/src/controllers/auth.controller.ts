@@ -79,7 +79,7 @@ export async function loginController(
     }
 
     // --- [DEBUG-AUTH] temporal (quitar luego: grep "[DEBUG-AUTH]") ---
-    if (env.NODE_ENV !== "production") {
+    if (env.NODE_ENV === "development") {
       console.log("[AUTH LOGIN] email recibido:", parsed.data.email);
     }
 
@@ -92,7 +92,7 @@ export async function loginController(
     res.cookie(env.SESSION_COOKIE_NAME, token, cookieOpts);
 
     // --- [DEBUG-AUTH] temporal ---
-    if (env.NODE_ENV !== "production") {
+    if (env.NODE_ENV === "development") {
       console.log("[AUTH LOGIN] usuario encontrado: sí | id:", user.id, "| role:", user.role, "| tenantId:", user.tenantId);
       console.log("[AUTH LOGIN] sesión creada: sí | cookieName:", env.SESSION_COOKIE_NAME);
       console.log("[AUTH LOGIN] cookieOptions:", JSON.stringify(cookieOpts));

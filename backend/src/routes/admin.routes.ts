@@ -37,6 +37,12 @@ import {
   adminPatchReadinessController,
   retryWebhookSubscriptionController,
 } from "../controllers/whatsapp-integration.controller.js";
+import {
+  adminAutomationHealthController,
+  adminCancelAutomationJobController,
+  adminListAutomationJobsController,
+  adminRetryAutomationJobController,
+} from "../controllers/admin-automation.controller.js";
 
 export const adminRoutes = Router();
 
@@ -94,6 +100,13 @@ adminRoutes.patch(
 
 // Webhooks de billing que no se pudieron asociar a un tenant (revisión manual)
 adminRoutes.get("/billing/unmatched-webhooks", listUnmatchedWebhooksController);
+
+// Motor de automatizaciones (Módulo 0): salud de la cola, jobs fallidos y
+// acciones operativas. Solo SUPER_ADMIN; el tenant usa /api/automations.
+adminRoutes.get("/automations/health", adminAutomationHealthController);
+adminRoutes.get("/automations/jobs", adminListAutomationJobsController);
+adminRoutes.post("/automations/jobs/:id/retry", adminSensitiveRateLimit, adminRetryAutomationJobController);
+adminRoutes.post("/automations/jobs/:id/cancel", adminSensitiveRateLimit, adminCancelAutomationJobController);
 
 adminRoutes.get("/cancellation-requests", listCancellationRequestsController);
 adminRoutes.post("/cancellation-requests/:id/approve", processCancellationController("approve"));

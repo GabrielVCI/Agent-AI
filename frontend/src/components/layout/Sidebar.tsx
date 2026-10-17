@@ -3,7 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, MessageSquare, Bot, Settings, Building2, CreditCard,
   ShieldCheck, X, Package, CalendarDays, GraduationCap, LogOut,
-  ChevronsLeft, ChevronsRight, Users, ClipboardX, Phone, Plug, LifeBuoy,
+  ChevronsLeft, ChevronsRight, Users, ClipboardX, Phone, Plug, LifeBuoy, Zap, Repeat,
 } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { listConversations } from '../../services/conversationsApi'
@@ -83,7 +83,9 @@ export default function Sidebar({ open, onClose }: Props) {
           icon: <MessageSquare className="h-5 w-5" />,
           badge: pendingCount,
         },
+        { label: 'Clientes', path: '/clientes', icon: <Users className="h-5 w-5" /> },
         { label: 'Citas', path: '/appointments', icon: <CalendarDays className="h-5 w-5" /> },
+        { label: 'Mantenimiento', path: '/mantenimiento', icon: <Repeat className="h-5 w-5" /> },
         { label: 'Llamadas', path: '/calls', icon: <Phone className="h-5 w-5" /> },
       ],
     },
@@ -92,6 +94,11 @@ export default function Sidebar({ open, onClose }: Props) {
       items: [
         { label: 'Agentes', path: '/agents', icon: <Bot className="h-5 w-5" /> },
         { label: 'Catálogo', path: '/catalog', icon: <Package className="h-5 w-5" /> },
+        {
+          label: 'Automatizaciones',
+          path: '/automatizaciones',
+          icon: <Zap className="h-5 w-5" />,
+        },
         {
           label: 'Entrenamiento',
           path: '/settings?tab=training',

@@ -7,6 +7,8 @@ import { logger } from "../config/logger.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { issueVerificationEmail } from "./email-verification.service.js";
 import type { AuthenticatedUser, SessionCachePayload } from "../types/auth.types.js";
+import { normalizeEmail } from "../utils/email.js";
+import { findUserByEmail } from "./user-lookup.service.js";
 
 const SESSION_PREFIX = "session:";
 
@@ -95,7 +97,7 @@ export async function loginUser(
   password: string,
   meta: { userAgent?: string; ipAddress?: string }
 ): Promise<{ token: string; user: AuthenticatedUser }> {
-  const user = await prisma.user.findUnique({ where: { email } });
+  const user = await findUserByEmail(email);
 
   // Mensaje idéntico para "no existe", "deshabilitado" y "password mal":
   // no revelamos cuál fue (enumeración de usuarios).
@@ -128,9 +130,9 @@ export async function registerUser(
   input: { name: string; lastName: string; email: string; password: string },
   meta: { userAgent?: string; ipAddress?: string }
 ): Promise<{ token: string; user: AuthenticatedUser; verificationEmailSent: boolean }> {
-  const email = input.email.toLowerCase().trim();
+  const email = normalizeEmail(input.email);
 
-  const existing = await prisma.user.findUnique({ where: { email } });
+  const existing = await findUserByEmail(email);
   if (existing) {
     throw new AppError("Ya existe una cuenta con ese correo", 409);
   }
@@ -187,7 +189,7 @@ export async function loginWithGoogleProfile(
     // Vincular por email si ya existe una cuenta local con ese correo.
     // Google ya verificó el correo (email_verified true, validado arriba):
     // se marca emailVerifiedAt sin exigir el flujo de verificación propio.
-    const byEmail = await prisma.user.findUnique({ where: { email: profile.email } });
+    const byEmail = await findUserByEmail(profile.email);
     if (byEmail) {
       user = await prisma.user.update({
         where: { id: byEmail.id },
@@ -201,7 +203,7 @@ export async function loginWithGoogleProfile(
         data: {
           name: profile.firstName,
           lastName: profile.lastName,
-          email: profile.email,
+          email: normalizeEmail(profile.email),
           googleId: profile.googleId,
           passwordHash: null,
           role: "OWNER",
@@ -267,7 +269,7 @@ export async function resolveSession(token: string): Promise<AuthenticatedUser |
   });
 
   // --- [DEBUG-AUTH] temporal (quitar luego: grep "[DEBUG-AUTH]") ---
-  const dbg = env.NODE_ENV !== "production";
+  const dbg = env.NODE_ENV === "development";
 
   if (!session) {
     if (dbg) console.log("[AUTH RESOLVE] sesión NO encontrada en DB para ese token");

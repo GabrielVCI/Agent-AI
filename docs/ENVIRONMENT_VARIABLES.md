@@ -32,6 +32,31 @@ Convenciones de la columna **Entornos**: `L` local · `S` staging · `P` prod.
 | `STORAGE_PATH` | ○ (default ../storage) | Carpeta de archivos generados | — | `../storage` | ○/○/○ |
 | `LOG_LEVEL` | ○ (default info) | error/warn/info/debug | — | `info` | ○/○/○ |
 
+## Automatizaciones — Módulo 0 (backend)
+
+Worker del motor de automatizaciones. Corre **dentro** del proceso del backend y
+reclama jobs de PostgreSQL con `FOR UPDATE SKIP LOCKED`: puede estar encendido en
+varias instancias a la vez sin ejecutar el mismo job dos veces.
+Detalle: `docs/AUTOMATION_CORE.md`.
+
+| Variable | Req. | Descripción | Dónde | Ejemplo | L/S/P |
+|---|---|---|---|---|---|
+| `AUTOMATION_WORKER_ENABLED` | ○ (default true) | Enciende el worker en esta instancia (`false` para dejarla solo como API) | — | `true` | ○/○/○ |
+| `AUTOMATION_BATCH_SIZE` | ○ (default 50) | Jobs reclamados por ciclo (backpressure) | — | `50` | ○/○/○ |
+| `AUTOMATION_CONCURRENCY` | ○ (default 5) | Jobs ejecutados en paralelo dentro del lote | — | `5` | ○/○/○ |
+| `AUTOMATION_POLL_INTERVAL_MS` | ○ (default 5000) | Frecuencia del ciclo del worker | — | `5000` | ○/○/○ |
+| `AUTOMATION_JOB_LEASE_MS` | ○ (default 300000) | Lease: pasado este tiempo un job en `PROCESSING` se recupera | — | `300000` | ○/○/○ |
+| `AUTOMATION_MAX_ATTEMPTS` | ○ (default 5) | Intentos por job cuando la regla no define uno propio | — | `5` | ○/○/○ |
+
+## Maestro de Clientes (Módulo 1)
+
+Identidad del cliente y normalización telefónica a E.164.
+Detalle: `docs/CUSTOMER_MASTER.md`.
+
+| Variable | Req. | Descripción | Dónde | Ejemplo | L/S/P |
+|---|---|---|---|---|---|
+| `DEFAULT_PHONE_COUNTRY` | ○ (default `DO`) | País ISO-2 asumido al normalizar un teléfono **sin** código internacional cuando la zona horaria de la empresa no se reconoce. Primero manda `Tenant.timezone`; esto evita que República Dominicana quede grabada en el dominio | — | `DO` | ○/○/○ |
+
 ## OpenAI (backend)
 
 | Variable | Req. | Descripción | Dónde | Ejemplo | L/S/P |
@@ -94,7 +119,11 @@ Controlan qué vías de conexión ofrece el panel. Estrategia completa:
 | `ALLOW_OPENAI_AUDIO_FALLBACK` | ○ (default false) | Permite Whisper como respaldo | — | `false` | ○/○/○ |
 | `ELEVENLABS_*` de costos (INCLUDED_MINUTES, OVERAGE_COST..., budgets) | ○ | Modelo de costos de minutos (defaults sanos) | — | — | ○/○/○ |
 
-## LemonSqueezy (backend, futuro cercano)
+## LemonSqueezy (backend)
+
+**Todas son EXCLUSIVAMENTE del backend.** Ninguna puede llevar prefijo `VITE_`:
+la API key y el webhook secret jamás salen del servidor; el frontend solo
+recibe una `checkoutUrl`.
 
 | Variable | Req. | Descripción | Dónde | Ejemplo | L/S/P |
 |---|---|---|---|---|---|
@@ -102,9 +131,26 @@ Controlan qué vías de conexión ofrece el panel. Estrategia completa:
 | `LEMONSQUEEZY_STORE_ID` | ○ | ID de la tienda | Dashboard LS | `12345` | —/○/✅* |
 | `LEMONSQUEEZY_WEBHOOK_SECRET` | ○ | Firma del webhook | LS → Webhooks | `whsec...` | —/○/✅* |
 | `LEMONSQUEEZY_BASIC_VARIANT_ID` / `_PRO_` / `_ENTERPRISE_` | ○ | Variant de cada plan | LS → Products | `111111` | —/○/✅* |
+| `LEMONSQUEEZY_API_URL` | ○ (default https://api.lemonsqueezy.com) | Base de la API. Solo se cambia para apuntar a un doble en pruebas | - | `https://api.lemonsqueezy.com` | ○/○/○ |
+| `LEMONSQUEEZY_TEST_MODE` | ○ (default false) | Marca los checkouts como test mode. Informativo: la verdad la da `test_mode` del evento | - | `true` en staging | ○/○/— |
 | `LEMONSQUEEZY_SUCCESS_URL` / `_CANCEL_URL` | ○ | Redirects post-checkout | Tu frontend | `https://app.sendwary.com/account?ok=1` | —/○/✅* |
 
 \* ✅ solo cuando se active el cobro online (LOCKED #10–11: manual permitido).
+
+**Variantes por plan**: la fuente preferida es `Plan.lemonSqueezyVariantId` /
+`Plan.lemonSqueezyProductId` en base de datos. Las variables
+`LEMONSQUEEZY_*_VARIANT_ID` siguen funcionando como respaldo legado por código
+de plan. Los `LEMONSQUEEZY_*_CHECKOUT_URL` (buy-links estáticos) ya NO se usan:
+el checkout se crea por API.
+
+**Webhook**: registrar en LemonSqueezy `POST {BACKEND_PUBLIC_URL}/api/webhooks/lemon-squeezy`.
+La ruta histórica `/api/billing/lemonsqueezy/webhook` sigue activa y apunta al
+mismo controlador, para no reconfigurar tiendas ya en marcha.
+
+**Separación de ambientes**: staging usa API key, productos/variants y webhook de
+*test mode*; producción los *live*. Nunca reutilizar credenciales live en
+desarrollo: una suscripción de prueba no debe conceder entitlement real
+(`Subscription.lemonSqueezyTestMode` guarda de cuál vino cada una).
 
 ## Soporte (backend)
 

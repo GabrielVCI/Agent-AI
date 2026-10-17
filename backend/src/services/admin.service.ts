@@ -10,6 +10,8 @@ import {
   sendImplementationPaymentReminderEmail,
 } from "./email.service.js";
 import { logger } from "../config/logger.js";
+import { normalizeEmail } from "../utils/email.js";
+import { findUserByEmail } from "./user-lookup.service.js";
 
 const customFieldsSchema = {
   customPlanName: z.string().max(80).nullish(),
@@ -251,7 +253,7 @@ export async function createTenantWithOwner(
 
   // Owner: si el email existe pero no pertenece a ninguna empresa, se asocia;
   // si ya pertenece a otra, error claro.
-  const existingUser = await prisma.user.findUnique({ where: { email: data.ownerEmail } });
+  const existingUser = await findUserByEmail(data.ownerEmail);
   if (existingUser?.tenantId) {
     throw new AppError("Ese email ya pertenece a otra empresa", 409);
   }
@@ -299,7 +301,7 @@ export async function createTenantWithOwner(
             tenantId: tenant.id,
             name: data.ownerFirstName,
             lastName: data.ownerLastName ?? null,
-            email: data.ownerEmail,
+            email: normalizeEmail(data.ownerEmail),
             passwordHash,
             role: "OWNER",
             status: "ACTIVE",
@@ -499,7 +501,7 @@ export async function createUserForTenant(input: {
   password: string;
   role: "ADMIN" | "AGENT_OPERATOR" | "BILLING";
 }) {
-  const existing = await prisma.user.findUnique({ where: { email: input.email } });
+  const existing = await findUserByEmail(input.email);
   if (existing) throw new AppError("Ya existe un usuario con ese email", 409);
 
   const tenant = await prisma.tenant.findUnique({ where: { id: input.tenantId } });
@@ -511,7 +513,7 @@ export async function createUserForTenant(input: {
     data: {
       tenantId: input.tenantId,
       name: input.name,
-      email: input.email,
+      email: normalizeEmail(input.email),
       passwordHash,
       role: input.role,
       status: "ACTIVE",

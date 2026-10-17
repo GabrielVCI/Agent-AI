@@ -21,6 +21,11 @@ import ConversationsPage from './pages/ConversationsPage'
 import AgentsPage from './pages/AgentsPage'
 import CatalogPage from './pages/CatalogPage'
 import AppointmentsPage from './pages/AppointmentsPage'
+import CustomersPage from './pages/CustomersPage'
+import CustomerDetailPage from './pages/CustomerDetailPage'
+import CustomerCategoriesPage from './pages/CustomerCategoriesPage'
+import AutomationsPage from './pages/AutomationsPage'
+import MaintenancePage from './pages/MaintenancePage'
 import CallsPage from './pages/CallsPage'
 import SettingsPage from './pages/SettingsPage'
 import CompanyPage from './pages/CompanyPage'
@@ -87,7 +92,14 @@ export default function App() {
                   <Route path="/agents" element={<AgentsPage />} />
                   <Route path="/catalog" element={<CatalogPage />} />
                   <Route path="/appointments" element={<AppointmentsPage />} />
+                  <Route path="/clientes" element={<CustomersPage />} />
+                  {/* Estática ANTES que /:id: React Router prioriza el segmento fijo,
+                      pero se deja explícito para que no dependa de ese detalle. */}
+                  <Route path="/clientes/categorias" element={<CustomerCategoriesPage />} />
+                  <Route path="/clientes/:id" element={<CustomerDetailPage />} />
                   <Route path="/calls" element={<CallsPage />} />
+                  <Route path="/automatizaciones" element={<AutomationsPage />} />
+                  <Route path="/mantenimiento" element={<MaintenancePage />} />
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="/company" element={<CompanyPage />} />
                   <Route path="/integrations" element={<IntegrationsPage />} />

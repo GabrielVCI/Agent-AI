@@ -27,6 +27,10 @@ export interface ActivationStatus {
   shouldShowPaywall: boolean
   shouldShowImplementationScreen: boolean
   paywallBypassUntil: string | null
+  /** true = pago hecho en LemonSqueezy, esperando la confirmación del webhook. */
+  paymentConfirmationPending: boolean
+  /** Regla de acceso resuelta en el backend; el frontend solo pinta cada caso. */
+  accessState: 'ALLOWED' | 'PENDING_CONFIRMATION' | 'PAYWALL_REQUIRED'
   reason: string
 }
 

@@ -53,6 +53,10 @@ Formato: **Decisión · Razón · Implicación · Qué NO se hará por ahora.**
 **10. Cobros online futuros: LemonSqueezy con overlay embebido.**
 - Razón: merchant of record (impuestos resueltos), overlay sin salir del panel.
 - Implicación: webhook firmado ya preparado; variant IDs por plan en envs.
+- Implicación: la ÚNICA autoridad que activa una suscripción es el webhook del
+  primer cobro (`subscription_payment_success` con `billing_reason=initial` y
+  `status=paid`). `subscription_created` solo correlaciona tenant y plan; ni el
+  overlay, ni `Checkout.Success`, ni la redirección conceden acceso.
 - NO por ahora: Stripe, pasarelas locales, cobro dentro del chat.
 
 **11. Billing manual permitido desde SUPER_ADMIN.**

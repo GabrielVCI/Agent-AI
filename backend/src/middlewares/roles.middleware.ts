@@ -4,7 +4,7 @@ import { env } from "../config/env.js";
 import type { UserRoleType } from "../types/auth.types.js";
 
 // --- [DEBUG-AUTH] temporal (quitar luego: grep "[DEBUG-AUTH]") ---
-const dbg = env.NODE_ENV !== "production";
+const dbg = env.NODE_ENV === "development";
 
 export function requireRole(...roles: UserRoleType[]) {
   return (req: Request, _res: Response, next: NextFunction): void => {

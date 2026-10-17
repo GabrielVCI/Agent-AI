@@ -118,11 +118,6 @@ export default function OnboardingPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  // Flujo comercial: primero verificar el correo, después crear la empresa
-  if (user && user.emailVerified === false) {
-    return <Navigate to="/verificar-correo" replace />
-  }
-
   const [form, setForm] = useState<FormData>({
     businessName: '',
     industry: '',
@@ -133,6 +128,14 @@ export default function OnboardingPage() {
     usesWhatsappBusiness: null,
     needsHumanHandoff: null,
   })
+
+  // Flujo comercial: primero verificar el correo, después crear la empresa.
+  // Va DESPUÉS de todos los hooks: un `return` antes de un useState cambia el
+  // número de hooks entre renders y React rompe el componente cuando
+  // emailVerified pasa de false a true sin desmontar.
+  if (user && user.emailVerified === false) {
+    return <Navigate to="/verificar-correo" replace />
+  }
 
   const set = <K extends keyof FormData>(key: K, value: FormData[K]) =>
     setForm(f => ({ ...f, [key]: value }))

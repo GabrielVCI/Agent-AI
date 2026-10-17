@@ -3,25 +3,16 @@ import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
 import { invalidateDashboardCache } from "./dashboard.service.js";
 
-export async function findOrCreateCustomer(input: {
-  tenantId: string;
-  phone: string;
-  customerName?: string;
-}) {
-  return prisma.customer.upsert({
-    where: {
-      tenantId_phone: { tenantId: input.tenantId, phone: input.phone },
-    },
-    update: {
-      name: input.customerName ?? undefined,
-    },
-    create: {
-      tenantId: input.tenantId,
-      phone: input.phone,
-      name: input.customerName ?? "Cliente",
-    },
-  });
-}
+/**
+ * Alta de contactos: la implementación vive en el Maestro de Clientes
+ * (services/customer/customer.service.ts), que es la ÚNICA fuente de verdad
+ * — normaliza el teléfono a E.164, deduplica contra la unique constraint del
+ * tenant y emite CUSTOMER_CREATED al motor.
+ *
+ * Se reexporta desde aquí porque WhatsApp, llamadas y citas ya importaban
+ * `findOrCreateCustomer` de este módulo: el contrato no cambia.
+ */
+export { findOrCreateCustomer } from "./customer/customer.service.js";
 
 export async function findOrCreateActiveConversation(input: {
   tenantId: string;
@@ -30,33 +21,46 @@ export async function findOrCreateActiveConversation(input: {
   whatsappPhone?: string;
   customerName?: string;
 }) {
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      tenantId: input.tenantId,
-      customerId: input.customerId,
-      status: { in: ["BOT_ACTIVE", "HUMAN_ACTIVE", "OPEN"] },
-    },
-    orderBy: { updatedAt: "desc" },
-  });
+  // Buscar-o-crear SERIALIZADO por cliente (falla F5). Un cliente nuevo que
+  // manda 2-3 mensajes seguidos genera webhooks casi simultáneos, cada uno con
+  // su propio messageId (la idempotencia no los agrupa): sin la barrera, todos
+  // veían "no hay conversación activa" y cada uno creaba la suya.
+  //
+  // Lock consultivo de TRANSACCIÓN: se libera solo al terminar la transacción,
+  // así que es compatible con PgBouncer en transaction mode. No se usa un
+  // índice único parcial porque hay bases con duplicados activos previos.
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`conv:${input.tenantId}:${input.customerId}`}, 0))`;
 
-  if (existing) return { conversation: existing, created: false };
+    const existing = await tx.conversation.findFirst({
+      where: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        status: { in: ["BOT_ACTIVE", "HUMAN_ACTIVE", "OPEN"] },
+      },
+      orderBy: { updatedAt: "desc" },
+    });
 
-  const conversation = await prisma.conversation.create({
-    data: {
-      tenantId: input.tenantId,
-      customerId: input.customerId,
-      agentId: input.agentId ?? null,
-      whatsappPhone: input.whatsappPhone ?? null,
-      customerName: input.customerName ?? null,
-      status: "BOT_ACTIVE",
-      lastMessageAt: new Date(),
-    },
+    if (existing) return { conversation: existing, created: false };
+
+    const conversation = await tx.conversation.create({
+      data: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        agentId: input.agentId ?? null,
+        whatsappPhone: input.whatsappPhone ?? null,
+        customerName: input.customerName ?? null,
+        status: "BOT_ACTIVE",
+        lastMessageAt: new Date(),
+      },
+    });
+    return { conversation, created: true };
   });
 
   // El dashboard cuenta conversaciones: invalidar su cache (fire-and-forget)
-  void invalidateDashboardCache(input.tenantId);
+  if (result.created) void invalidateDashboardCache(input.tenantId);
 
-  return { conversation, created: true };
+  return result;
 }
 
 export async function saveInboundMessage(input: {
@@ -163,12 +167,20 @@ export async function updateConversationLastMessage(input: {
   });
 }
 
-export async function getConversationHistory(conversationId: string) {
-  return prisma.message.findMany({
+/**
+ * Los ÚLTIMOS `limit` mensajes de la conversación, en orden cronológico.
+ *
+ * Se piden en orden descendente y se invierten: con `asc` + `take` se obtenían
+ * los MÁS ANTIGUOS, y en un hilo largo ni el Inbox mostraba lo último ni la IA
+ * recibía como contexto lo que el cliente acababa de decir (falla F3).
+ */
+export async function getConversationHistory(conversationId: string, limit = 20) {
+  const latest = await prisma.message.findMany({
     where: { conversationId },
-    orderBy: { createdAt: "asc" },
-    take: 20,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit,
   });
+  return latest.reverse();
 }
 
 export async function takeoverConversation(input: {

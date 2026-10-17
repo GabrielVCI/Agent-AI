@@ -12,7 +12,7 @@ export async function requireAuth(
     const token = req.cookies?.[env.SESSION_COOKIE_NAME];
 
     // --- [DEBUG-AUTH] temporal (quitar luego: grep "[DEBUG-AUTH]") ---
-    const dbg = env.NODE_ENV !== "production";
+    const dbg = env.NODE_ENV === "development";
     if (dbg) {
       console.log("[AUTH MIDDLEWARE] ruta:", req.method, req.originalUrl);
       console.log("[AUTH MIDDLEWARE] origin:", req.headers.origin ?? "(sin origin)");

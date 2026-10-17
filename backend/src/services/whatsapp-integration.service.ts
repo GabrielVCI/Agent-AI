@@ -1600,6 +1600,33 @@ export async function resolveSendCredentials(phoneNumberId: string): Promise<{
   return null;
 }
 
+/**
+ * Como `resolveSendCredentials`, pero para envíos iniciados DESDE un tenant
+ * (respuesta manual del Inbox, recordatorios de citas): si el número pertenece
+ * a la integración de OTRA empresa, `allowed: false` y el llamador NO debe
+ * enviar. Evita usar el token de Meta de otro cliente a través de un agente
+ * con un phoneNumberId ajeno.
+ */
+export async function resolveSendCredentialsForTenant(
+  tenantId: string,
+  phoneNumberId: string
+): Promise<
+  | { allowed: false; credentials: null }
+  | { allowed: true; credentials: Awaited<ReturnType<typeof resolveSendCredentials>> }
+> {
+  const owner = await prisma.whatsAppIntegration.findUnique({
+    where: { phoneNumberId },
+    select: { tenantId: true },
+  });
+  if (owner && owner.tenantId !== tenantId) {
+    logger.error(
+      `[WHATSAPP INTEGRATION] envío bloqueado: el número ${phoneNumberId} pertenece a otra empresa (tenant solicitante ${tenantId})`
+    );
+    return { allowed: false, credentials: null };
+  }
+  return { allowed: true, credentials: await resolveSendCredentials(phoneNumberId) };
+}
+
 // ─── Panel SUPER_ADMIN ───────────────────────────────────────────────────────
 
 /** Vista admin de la conexión de un tenant. Nunca incluye el token. */

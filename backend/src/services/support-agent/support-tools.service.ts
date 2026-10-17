@@ -1,4 +1,9 @@
 import { prisma } from "../../config/prisma.js";
+import {
+  isLemonSqueezyConfigured,
+  isLemonSqueezyTestMode,
+  isLemonSqueezyWebhookConfigured,
+} from "../billing/lemon-squeezy/lemonSqueezy.config.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
 import { getRedisClient } from "../../config/redis.js";
@@ -37,7 +42,12 @@ export interface SupportHealth {
   openAi: { configured: boolean };
   metaWhatsApp: { configured: boolean; verifyTokenConfigured: boolean };
   elevenLabs: { configured: boolean; webhookSecretConfigured: boolean };
-  lemonSqueezy: { configured: boolean };
+  lemonSqueezy: {
+    configured: boolean;
+    webhookSecretConfigured: boolean;
+    /** Ambiente declarado de LemonSqueezy (test vs live). */
+    testMode: boolean;
+  };
   googleOAuth: { configured: boolean };
   checkedAt: string;
 }
@@ -74,7 +84,11 @@ export async function getSystemHealth(): Promise<SupportHealth> {
       configured: Boolean(env.ELEVENLABS_API_KEY),
       webhookSecretConfigured: Boolean(env.ELEVENLABS_WEBHOOK_SECRET),
     },
-    lemonSqueezy: { configured: Boolean(env.LEMONSQUEEZY_API_KEY) },
+    lemonSqueezy: {
+      configured: isLemonSqueezyConfigured(),
+      webhookSecretConfigured: isLemonSqueezyWebhookConfigured(),
+      testMode: isLemonSqueezyTestMode(),
+    },
     googleOAuth: {
       configured: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
     },
