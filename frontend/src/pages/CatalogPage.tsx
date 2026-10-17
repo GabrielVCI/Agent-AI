@@ -7,6 +7,8 @@ import {
   CatalogItem,
   CatalogItemInput,
   CatalogItemType,
+  RecurrenceUnit,
+  RECURRENCE_UNIT_LABELS,
 } from '../services/catalogApi'
 import PaginationBar from '../components/ui/PaginationBar'
 import { Card } from '../components/ui/Card'
@@ -38,6 +40,10 @@ interface ItemFormState {
   quantity: string
   sku: string
   isActive: boolean
+  // Recurrencia del servicio (Módulo 3)
+  recurrenceEnabled: boolean
+  recurrenceInterval: string
+  recurrenceUnit: RecurrenceUnit
 }
 
 const emptyItemForm: ItemFormState = {
@@ -51,6 +57,11 @@ const emptyItemForm: ItemFormState = {
   quantity: '0',
   sku: '',
   isActive: true,
+  // Apagada y SIN intervalo por defecto: el plazo lo decide el negocio, no
+  // Sendwary. Sin política configurada, completar el servicio no programa nada.
+  recurrenceEnabled: false,
+  recurrenceInterval: '',
+  recurrenceUnit: 'DAYS',
 }
 
 function itemToForm(item: CatalogItem): ItemFormState {
@@ -65,6 +76,9 @@ function itemToForm(item: CatalogItem): ItemFormState {
     quantity: item.quantity === null ? '' : String(item.quantity),
     sku: item.sku ?? '',
     isActive: item.isActive,
+    recurrenceEnabled: item.recurrenceEnabled,
+    recurrenceInterval: item.recurrenceInterval === null ? '' : String(item.recurrenceInterval),
+    recurrenceUnit: item.recurrenceUnit ?? 'DAYS',
   }
 }
 
@@ -123,6 +137,11 @@ function ItemFormModal({
       quantity: isService ? null : Number(form.quantity || 0),
       sku: form.sku.trim() || null,
       isActive: form.isActive,
+      // Un producto no se "repite": la recurrencia solo viaja para servicios.
+      recurrenceEnabled: isService ? form.recurrenceEnabled : false,
+      recurrenceInterval:
+        isService && form.recurrenceEnabled ? Number(form.recurrenceInterval) || null : null,
+      recurrenceUnit: isService && form.recurrenceEnabled ? form.recurrenceUnit : null,
     }
 
     setSaving(true)
@@ -251,6 +270,54 @@ function ItemFormModal({
             />
           </div>
         </div>
+
+        {/* Recurrencia (Módulo 3): solo tiene sentido en servicios */}
+        {isService && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+            <label className="flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={form.recurrenceEnabled}
+                onChange={e => set('recurrenceEnabled', e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+              />
+              <span>
+                <span className="font-medium">Este servicio se repite</span>
+                <span className="block text-xs text-slate-500">
+                  Al completar una cita con este servicio, Sendwary calcula cuándo toca el
+                  siguiente y programa el recordatorio si tienes la automatización activa.
+                </span>
+              </span>
+            </label>
+
+            {form.recurrenceEnabled && (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-sm text-slate-600">Cada</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={form.recurrenceInterval}
+                  onChange={e => set('recurrenceInterval', e.target.value)}
+                  placeholder="40"
+                  className={`${inputClass} w-24`}
+                  required
+                />
+                <select
+                  value={form.recurrenceUnit}
+                  onChange={e => set('recurrenceUnit', e.target.value as RecurrenceUnit)}
+                  className={`${inputClass} w-36`}
+                >
+                  {(Object.keys(RECURRENCE_UNIT_LABELS) as RecurrenceUnit[]).map(unit => (
+                    <option key={unit} value={unit}>
+                      {RECURRENCE_UNIT_LABELS[unit]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -679,6 +746,12 @@ export default function CatalogPage() {
                         <td className="px-4 py-3">
                           <p className="font-medium text-slate-900">{item.name}</p>
                           {item.sku && <p className="text-xs text-slate-400">SKU: {item.sku}</p>}
+                          {/* Recurrencia real configurada por el negocio */}
+                          {item.recurrenceLabel && (
+                            <p className="text-xs text-violet-600">
+                              Se repite {item.recurrenceLabel}
+                            </p>
+                          )}
                         </td>
                         <td className="px-4 py-3">
                           {item.type === 'SERVICE' ? (

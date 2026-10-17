@@ -109,6 +109,11 @@ const itemSchema = z.object({
   sku: z.string().max(60).nullish(),
   unit: z.string().max(30).optional(),
   isActive: z.boolean().default(true),
+  // Recurrencia del servicio (Módulo 3). Sin valor por defecto a propósito:
+  // el intervalo lo decide el negocio, no Sendwary.
+  recurrenceEnabled: z.boolean().optional(),
+  recurrenceInterval: z.coerce.number().int().min(1).max(3650).nullish(),
+  recurrenceUnit: z.enum(["DAYS", "WEEKS", "MONTHS"]).nullish(),
 });
 
 const listQuerySchema = z.object({

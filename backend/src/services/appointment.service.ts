@@ -5,6 +5,24 @@ import { sendWhatsappTextMessage } from "./meta-whatsapp.service.js";
 import { resolveSendCredentials } from "./whatsapp-integration.service.js";
 import { invalidateDashboardCache } from "./dashboard.service.js";
 import { logger } from "../config/logger.js";
+import {
+  findOrCreateCustomer,
+  promoteToClient,
+  recalculateCustomerVisitStats,
+} from "./customer/customer.service.js";
+import {
+  cancelAutomationsForEntity,
+  emitAutomationEvent,
+} from "./automation/automation-events.service.js";
+import type { AutomationEventType } from "./automation/automation.types.js";
+import {
+  emitCompletionEvents,
+  getTenantTimezone,
+  persistCompletion,
+  persistReopen,
+} from "./appointment/appointment-completion.service.js";
+import { recurrenceEntityId } from "./appointment/service-recurrence.js";
+import { toLineDTO } from "./appointment/appointment-lines.service.js";
 
 // ─── Settings (nivel tenant, JSON en Tenant.appointmentSettings) ─────────────
 
@@ -89,6 +107,12 @@ const appointmentInclude = {
   agent: { select: { id: true, name: true } },
   catalogItem: { select: { id: true, name: true } },
   conversation: { select: { id: true, customerName: true } },
+  // Servicios y productos de la cita (Módulo 3). Include controlado: solo lo
+  // que pinta la ficha, y en la misma consulta para no hacer N+1 en el listado.
+  lines: {
+    orderBy: { createdAt: "asc" },
+    include: { product: { select: { id: true, itemType: true } } },
+  },
 } as const;
 
 type AppointmentWithRelations = Prisma.AppointmentGetPayload<{
@@ -98,6 +122,8 @@ type AppointmentWithRelations = Prisma.AppointmentGetPayload<{
 export function serializeAppointment(a: AppointmentWithRelations) {
   return {
     id: a.id,
+    // Vínculo con el Maestro de Clientes (null en citas antiguas sin backfill)
+    customerId: a.customerId,
     customerName: a.customerName,
     customerPhone: a.customerPhone,
     customerEmail: a.customerEmail,
@@ -115,6 +141,8 @@ export function serializeAppointment(a: AppointmentWithRelations) {
     confirmedAt: a.confirmedAt,
     cancelledAt: a.cancelledAt,
     rescheduledAt: a.rescheduledAt,
+    completedAt: a.completedAt,
+    lines: a.lines.map(toLineDTO),
     agentId: a.agentId,
     agent: a.agent,
     conversationId: a.conversationId,
@@ -158,6 +186,99 @@ async function logAppointmentEvent(input: {
   } catch (err) {
     // El evento en conversación es informativo: no debe tumbar la operación de cita.
     logger.warn(`No se pudo registrar evento de cita en conversación: ${String(err)}`);
+  }
+}
+
+// ─── Puente con el motor de automatizaciones (Módulo 0) ─────────────────────
+
+/**
+ * Vincula la cita con su cliente del Maestro (Módulo 1) y devuelve el id.
+ *
+ * Las citas guardan customerName/customerPhone como copia histórica de lo que
+ * se agendó; `customerId` es el vínculo vivo con el maestro. Si el contacto no
+ * existe se crea como CONTACT (todavía no es cliente: eso ocurre al
+ * confirmarse la cita, ver promoteToClient más abajo).
+ *
+ * Nunca rompe la operación de la cita: ante fallo devuelve null.
+ */
+async function linkAppointmentCustomer(
+  tenantId: string,
+  appointment: { id: string; customerId: string | null; customerPhone: string; customerName: string }
+): Promise<string | null> {
+  if (appointment.customerId) return appointment.customerId;
+  try {
+    const customer = await findOrCreateCustomer({
+      tenantId,
+      phone: appointment.customerPhone.trim(),
+      customerName: appointment.customerName?.trim() || undefined,
+      source: "APPOINTMENT",
+    });
+    await prisma.appointment.updateMany({
+      where: { id: appointment.id, tenantId, customerId: null },
+      data: { customerId: customer.id },
+    });
+    return customer.id;
+  } catch (err) {
+    logger.warn(`[APPOINTMENTS] no se pudo resolver el contacto de la cita: ${String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Emite un evento de cita al motor y devuelve el id del cliente vinculado
+ * (null si no se pudo resolver). Los fallos quedan en el log del motor.
+ */
+async function emitAppointmentEvent(input: {
+  type: AutomationEventType;
+  tenantId: string;
+  appointment: AppointmentWithRelations;
+  /** Sufijo extra de la clave de evento (p. ej. la nueva fecha al posponer). */
+  keySuffix?: string;
+}): Promise<string | null> {
+  const { appointment, tenantId } = input;
+  const customerId = await linkAppointmentCustomer(tenantId, appointment);
+
+  await emitAutomationEvent({
+    tenantId,
+    type: input.type,
+    source: "appointments",
+    entityType: "APPOINTMENT",
+    entityId: appointment.id,
+    customerId: customerId ?? undefined,
+    payload: {
+      appointmentId: appointment.id,
+      scheduledAt: appointment.scheduledAt.toISOString(),
+      serviceOrProduct: appointment.serviceOrProduct,
+      status: appointment.status,
+      source: appointment.source,
+      priority: appointment.priority,
+      customerName: appointment.customerName,
+      customerPhone: appointment.customerPhone,
+      ...(appointment.agentId ? { agentId: appointment.agentId } : {}),
+      ...(appointment.conversationId ? { conversationId: appointment.conversationId } : {}),
+      ...(appointment.catalogItemId ? { catalogItemId: appointment.catalogItemId } : {}),
+    },
+    idempotencyKey: `${input.type}:${appointment.id}${input.keySuffix ? `:${input.keySuffix}` : ""}`,
+  });
+
+  return customerId;
+}
+
+/**
+ * Una cita CONFIRMADA es la evidencia mínima de que el contacto ya es cliente
+ * (§8 del Módulo 1): es el único punto del flujo de WhatsApp donde un contacto
+ * pasa a CLIENT. Un simple "Hola" nunca lo consigue.
+ * Idempotente y silencioso ante fallo: no puede tumbar la confirmación.
+ */
+async function promoteAppointmentCustomer(
+  tenantId: string,
+  customerId: string | null
+): Promise<void> {
+  if (!customerId) return;
+  try {
+    await promoteToClient(tenantId, customerId, "cita confirmada");
+  } catch (err) {
+    logger.warn(`[APPOINTMENTS] no se pudo promover el contacto a cliente: ${String(err)}`);
   }
 }
 
@@ -336,7 +457,17 @@ export async function createAppointment(tenantId: string, input: AppointmentInpu
     text: `📅 Cita ${status === "CONFIRMED" ? "confirmada" : "registrada"}: ${appointment.serviceOrProduct} — ${fecha} a las ${hora} (${appointment.customerName})`,
   });
 
-  return serializeAppointment(appointment);
+  const customerId = await emitAppointmentEvent({
+    type: "APPOINTMENT_CREATED",
+    tenantId,
+    appointment,
+  });
+  if (status === "CONFIRMED") {
+    await emitAppointmentEvent({ type: "APPOINTMENT_CONFIRMED", tenantId, appointment });
+    await promoteAppointmentCustomer(tenantId, customerId);
+  }
+
+  return serializeAppointment({ ...appointment, customerId: appointment.customerId ?? customerId });
 }
 
 export async function getAppointment(tenantId: string, id: string) {
@@ -348,7 +479,7 @@ export async function updateAppointment(
   id: string,
   input: Partial<AppointmentInput>
 ) {
-  await getOwnAppointment(tenantId, id);
+  const current = await getOwnAppointment(tenantId, id);
 
   if (input.catalogItemId) {
     const item = await prisma.product.findFirst({
@@ -357,9 +488,15 @@ export async function updateAppointment(
     if (!item) throw new AppError("El ítem del catálogo indicado no existe", 400);
   }
 
+  // Si cambia el teléfono, el vínculo con el maestro deja de ser válido: se
+  // suelta y se vuelve a resolver contra el contacto correcto.
+  const phoneChanged =
+    input.customerPhone !== undefined && input.customerPhone.trim() !== current.customerPhone;
+
   const appointment = await prisma.appointment.update({
     where: { id },
     data: {
+      ...(phoneChanged ? { customerId: null } : {}),
       ...(input.customerName !== undefined ? { customerName: input.customerName.trim() } : {}),
       ...(input.customerPhone !== undefined ? { customerPhone: input.customerPhone.trim() } : {}),
       ...(input.customerEmail !== undefined
@@ -376,7 +513,18 @@ export async function updateAppointment(
     include: appointmentInclude,
   });
 
-  return serializeAppointment(appointment);
+  const customerId = phoneChanged
+    ? await linkAppointmentCustomer(tenantId, appointment)
+    : appointment.customerId;
+
+  // Cambiar el teléfono mueve la cita de contacto: las visitas del anterior y
+  // las del nuevo dejan de cuadrar si no se recalculan ambas.
+  if (phoneChanged && appointment.status === "COMPLETED") {
+    if (current.customerId) await recalculateCustomerVisitStats(tenantId, current.customerId);
+    if (customerId) await recalculateCustomerVisitStats(tenantId, customerId);
+  }
+
+  return serializeAppointment({ ...appointment, customerId: customerId ?? null });
 }
 
 // ─── Transiciones del gestor de citas ────────────────────────────────────────
@@ -397,6 +545,13 @@ export async function confirmAppointment(tenantId: string, id: string) {
     conversationId: appointment.conversationId,
     text: `✅ Cita confirmada: ${appointment.serviceOrProduct} — ${fecha} a las ${hora}`,
   });
+  const customerId = await emitAppointmentEvent({
+    type: "APPOINTMENT_CONFIRMED",
+    tenantId,
+    appointment,
+  });
+  // Cita confirmada = cliente confirmado.
+  await promoteAppointmentCustomer(tenantId, customerId);
   return serializeAppointment(appointment);
 }
 
@@ -423,6 +578,15 @@ export async function cancelAppointment(tenantId: string, id: string, reason?: s
     conversationId: appointment.conversationId,
     text: `❌ Cita cancelada: ${appointment.serviceOrProduct} (${appointment.customerName})`,
   });
+  // La cita ya no existe para el cliente: TODO envío futuro colgado de ella se
+  // cancela, además de lo que decidan las reglas que escuchan el evento.
+  await cancelAutomationsForEntity({
+    tenantId,
+    entityType: "APPOINTMENT",
+    entityId: appointment.id,
+    reason: "Cita cancelada",
+  });
+  await emitAppointmentEvent({ type: "APPOINTMENT_CANCELLED", tenantId, appointment });
   return serializeAppointment(appointment);
 }
 
@@ -460,6 +624,15 @@ export async function rescheduleAppointment(
     conversationId: appointment.conversationId,
     text: `🔁 Cita pospuesta: ${appointment.serviceOrProduct} — nueva fecha ${fecha} a las ${hora}`,
   });
+  // Reprogramación: el evento reevalúa las reglas y, gracias a la clave de
+  // idempotencia (regla+cita), el recordatorio existente se MUEVE en vez de
+  // duplicarse.
+  await emitAppointmentEvent({
+    type: "APPOINTMENT_RESCHEDULED",
+    tenantId,
+    appointment,
+    keySuffix: String(appointment.scheduledAt.getTime()),
+  });
   return serializeAppointment(appointment);
 }
 
@@ -478,24 +651,137 @@ export async function markNoShow(tenantId: string, id: string) {
     conversationId: appointment.conversationId,
     text: `⚠️ Cliente no asistió a la cita: ${appointment.serviceOrProduct} (${appointment.customerName})`,
   });
+  await cancelAutomationsForEntity({
+    tenantId,
+    entityType: "APPOINTMENT",
+    entityId: appointment.id,
+    reason: "Cliente no asistió",
+  });
+  await emitAppointmentEvent({ type: "APPOINTMENT_NO_SHOW", tenantId, appointment });
   return serializeAppointment(appointment);
 }
 
+/**
+ * Cierra una cita: la convierte en la VISITA y en historial comercial real
+ * (Módulo 3).
+ *
+ * Es el ÚNICO camino de la transición a COMPLETED. El orden importa:
+ *
+ *   1. persistCompletion  → transacción: estado + líneas + snapshots.
+ *   2. (commit)
+ *   3. métricas, eventos y automatizaciones — YA fuera de la transacción, para
+ *      no tener PostgreSQL esperando a WhatsApp ni a OpenAI.
+ *
+ * Es idempotente: si la cita ya estaba cerrada devuelve su estado actual (200)
+ * sin volver a registrar visita, servicios ni recurrencias. Un doble clic, un
+ * retry del navegador o dos instancias de Railway producen exactamente una
+ * visita.
+ */
 export async function completeAppointment(tenantId: string, id: string) {
-  const existing = await getOwnAppointment(tenantId, id);
-  if (existing.status === "CANCELLED") {
-    throw new AppError("No se puede completar una cita cancelada", 409);
-  }
-  const appointment = await prisma.appointment.update({
-    where: { id },
-    data: { status: "COMPLETED" },
+  const timezone = await getTenantTimezone(tenantId);
+
+  // ── 1 y 2: persistencia atómica ──
+  const result = await persistCompletion(tenantId, id, timezone);
+
+  const appointment = await prisma.appointment.findFirstOrThrow({
+    where: { id, tenantId },
     include: appointmentInclude,
   });
+
+  if (!result.changed) {
+    // Reintento legítimo: nada que repetir.
+    logger.info(`[APPOINTMENTS] cierre idempotente tenant=${tenantId} appointment=${id}`);
+    return serializeAppointment(appointment);
+  }
+
+  // ── 3: efectos posteriores al commit ──
   await logAppointmentEvent({
     tenantId,
     conversationId: appointment.conversationId,
     text: `🎉 Cita completada: ${appointment.serviceOrProduct} (${appointment.customerName})`,
   });
+  // El recordatorio de esta cita ya no aplica.
+  await cancelAutomationsForEntity({
+    tenantId,
+    entityType: "APPOINTMENT",
+    entityId: appointment.id,
+    reason: "Cita completada",
+  });
+
+  const customerId = await emitAppointmentEvent({
+    type: "APPOINTMENT_COMPLETED",
+    tenantId,
+    appointment,
+  });
+
+  if (customerId) {
+    // Métricas del maestro: se recalculan ENTERAS desde las citas completadas
+    // (nunca +1), así el "sin regresar en X días" del listado no se desvía y
+    // reabrir una cita mal cerrada las deja correctas otra vez.
+    await recalculateCustomerVisitStats(tenantId, customerId);
+    await promoteAppointmentCustomer(tenantId, customerId);
+    // CUSTOMER_VISITED, SERVICE_USED y PRODUCT_PURCHASED. La segmentación y las
+    // recurrencias cuelgan de aquí: este servicio no envía mensajes ni asigna
+    // categorías por su cuenta.
+    await emitCompletionEvents({
+      tenantId,
+      customerId,
+      appointment,
+      completedAt: result.completedAt,
+      performedLines: result.performedLines,
+    });
+  }
+
+  return serializeAppointment(appointment);
+}
+
+/**
+ * Reabre una cita cerrada por error.
+ *
+ * Sin esta operación, un clic equivocado dejaría una visita fantasma en las
+ * métricas del cliente para siempre. Al reabrir se revierte el historial, se
+ * RECALCULAN las métricas desde las citas reales y se cancelan por el
+ * Automation Core los seguimientos que había programado esa visita.
+ */
+export async function reopenAppointment(
+  tenantId: string,
+  id: string,
+  reason?: string
+) {
+  const result = await persistReopen(tenantId, id, "CONFIRMED");
+
+  const appointment = await prisma.appointment.findFirstOrThrow({
+    where: { id, tenantId },
+    include: appointmentInclude,
+  });
+
+  if (!result.changed) return serializeAppointment(appointment);
+
+  await logAppointmentEvent({
+    tenantId,
+    conversationId: appointment.conversationId,
+    text: `↩️ Cita reabierta: ${appointment.serviceOrProduct} (${appointment.customerName})${
+      reason ? ` — ${reason}` : ""
+    }`,
+  });
+
+  if (result.customerId) {
+    await recalculateCustomerVisitStats(tenantId, result.customerId);
+
+    // Los seguimientos que nacieron de esta visita dejan de tener sentido. Se
+    // CANCELAN por el motor (quedan como CANCELLED con su motivo), nunca se
+    // borran filas: el historial de automatizaciones debe sobrevivir.
+    for (const serviceId of result.serviceIds) {
+      await cancelAutomationsForEntity({
+        tenantId,
+        entityType: "CUSTOMER",
+        entityId: recurrenceEntityId(result.customerId, serviceId),
+        reason: "Cita reabierta",
+      });
+    }
+  }
+
+  logger.info(`[APPOINTMENTS] cita reabierta tenant=${tenantId} appointment=${id}`);
   return serializeAppointment(appointment);
 }
 

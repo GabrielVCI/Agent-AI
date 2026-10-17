@@ -14,6 +14,44 @@ export type AppointmentStatus =
 export type AppointmentPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'FOLLOW_UP'
 export type AppointmentSource = 'AI' | 'MANUAL' | 'WHATSAPP' | 'ADMIN'
 
+// ─── Servicios y productos de la cita (Módulo 3) ─────────────────────────────
+
+/**
+ * Qué representa una línea. Separar la VENTA del USO INTERNO es lo que evita
+ * cobrarle al cliente el material que gastó el negocio durante el servicio.
+ */
+export type AppointmentLineKind = 'SERVICE' | 'PRODUCT_SOLD' | 'PRODUCT_USED'
+
+/** Un servicio agendado no es un servicio realizado. */
+export type AppointmentLineStatus = 'PLANNED' | 'PERFORMED' | 'SKIPPED'
+
+export interface AppointmentLine {
+  id: string
+  kind: AppointmentLineKind
+  status: AppointmentLineStatus
+  productId: string | null
+  /** Nombre y precio congelados en el cierre: el historial no se reescribe. */
+  name: string
+  unitPrice: number
+  quantity: number
+  total: number
+  performedAt: string | null
+  /** Próxima fecha recomendada; null si el servicio no tiene recurrencia. */
+  nextRecommendedAt: string | null
+  notes: string | null
+  catalogItemType: 'PRODUCT' | 'SERVICE' | null
+}
+
+export interface AppointmentLineInput {
+  productId?: string | null
+  name?: string
+  kind?: AppointmentLineKind
+  quantity?: number
+  unitPrice?: number
+  notes?: string | null
+  status?: AppointmentLineStatus
+}
+
 export interface Appointment {
   id: string
   customerName: string
@@ -33,6 +71,10 @@ export interface Appointment {
   confirmedAt: string | null
   cancelledAt: string | null
   rescheduledAt: string | null
+  /** Marca de la VISITA. null = la cita todavía no se cerró. */
+  completedAt: string | null
+  /** Lo que se atendió: servicios y productos de esta cita. */
+  lines: AppointmentLine[]
   agentId: string | null
   agent: { id: string; name: string } | null
   conversationId: string | null
@@ -129,6 +171,22 @@ export const appointmentsApi = {
   noShow: (id: string) => api.post<Appointment>(`/api/appointments/${id}/no-show`),
 
   complete: (id: string) => api.post<Appointment>(`/api/appointments/${id}/complete`),
+
+  /** Corrige un cierre equivocado: revierte la visita y recalcula métricas. */
+  reopen: (id: string, reason?: string) =>
+    api.post<Appointment>(`/api/appointments/${id}/reopen`, { reason }),
+
+  // ── Servicios y productos de la cita (Módulo 3) ──
+  lines: (id: string) => api.get<AppointmentLine[]>(`/api/appointments/${id}/lines`),
+
+  addLine: (id: string, data: AppointmentLineInput) =>
+    api.post<AppointmentLine>(`/api/appointments/${id}/lines`, data),
+
+  updateLine: (id: string, lineId: string, data: Partial<AppointmentLineInput>) =>
+    api.patch<AppointmentLine>(`/api/appointments/${id}/lines/${lineId}`, data),
+
+  removeLine: (id: string, lineId: string) =>
+    api.delete<{ removed: boolean }>(`/api/appointments/${id}/lines/${lineId}`),
 
   processReminders: () => api.post<RemindersResult>('/api/appointments/process-reminders'),
 

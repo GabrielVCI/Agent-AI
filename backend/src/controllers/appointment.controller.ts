@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import * as appointments from "../services/appointment.service.js";
 import * as excel from "../services/excel-appointments.service.js";
+import * as lines from "../services/appointment/appointment-lines.service.js";
 import { AppError } from "../middlewares/error.middleware.js";
 
 function tenantIdOf(req: Request): string {
@@ -195,6 +196,120 @@ export async function completeAppointmentController(
   try {
     const appointment = await appointments.completeAppointment(tenantIdOf(req), req.params.id);
     res.json({ success: true, data: appointment });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Reabre una cita cerrada por error. Revierte historial y RECALCULA métricas:
+ * es la única forma soportada de corregir un cierre, en vez de editar líneas
+ * por debajo y dejar los agregados mintiendo.
+ */
+export async function reopenAppointmentController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const reason = z.string().trim().max(200).optional().safeParse(req.body?.reason);
+    const appointment = await appointments.reopenAppointment(
+      tenantIdOf(req),
+      req.params.id,
+      reason.success ? reason.data : undefined
+    );
+    res.json({
+      success: true,
+      data: appointment,
+      message: "Cita reabierta. Las métricas del cliente se recalcularon.",
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Servicios y productos de la cita (Módulo 3) ─────────────────────────────
+
+const lineSchema = z.object({
+  productId: z.string().trim().max(40).nullish(),
+  name: z.string().trim().min(2).max(160).optional(),
+  kind: z.enum(["SERVICE", "PRODUCT_SOLD", "PRODUCT_USED"]).optional(),
+  quantity: z.coerce.number().int().min(1).max(9999).optional(),
+  unitPrice: z.coerce.number().min(0).max(99_999_999).optional(),
+  notes: z.string().trim().max(300).nullish(),
+  status: z.enum(["PLANNED", "PERFORMED", "SKIPPED"]).optional(),
+});
+
+export async function listAppointmentLinesController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const data = await lines.listAppointmentLines(tenantIdOf(req), req.params.id);
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function addAppointmentLineController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const parsed = lineSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Revisa los datos ingresados.",
+        error: { code: "VALIDATION_ERROR", message: "Revisa los datos ingresados." },
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+    const data = await lines.addAppointmentLine(tenantIdOf(req), req.params.id, parsed.data);
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateAppointmentLineController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const parsed = lineSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Revisa los datos ingresados.",
+        error: { code: "VALIDATION_ERROR", message: "Revisa los datos ingresados." },
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+    const data = await lines.updateAppointmentLine(
+      tenantIdOf(req),
+      req.params.id,
+      req.params.lineId,
+      parsed.data
+    );
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function removeAppointmentLineController(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    await lines.removeAppointmentLine(tenantIdOf(req), req.params.id, req.params.lineId);
+    res.json({ success: true, data: { removed: true } });
   } catch (err) {
     next(err);
   }

@@ -6,6 +6,8 @@
 ## Descripción
 El agente IA crea citas cuando reúne nombre+servicio+fecha; valida contra la disponibilidad configurada (weeklySchedule en appointmentSettings). `autoConfirmAI` confirma automático SOLO si hay horario configurado.
 
+**Vínculo con el Maestro de Clientes (Módulo 1)**: toda cita se asocia a una ficha de cliente (`Appointment.customerId`) por teléfono normalizado. Al **confirmar** una cita, el contacto pasa a ser CLIENTE. Al **completarla**, cuenta como **una visita** y actualiza las métricas de la ficha (una cita = una visita, aunque incluya varios servicios). Las citas canceladas y los no-show no cuentan como visita. Ver `docs/CUSTOMER_MASTER.md` y el playbook `customers.md`.
+
 ## Errores comunes y síntomas
 | Síntoma | Causa |
 |---|---|
@@ -36,6 +38,14 @@ El agente IA crea citas cuando reúne nombre+servicio+fecha; valida contra la di
 ## Logs / env / endpoints
 - Logs: `[EXCEL IMPORT]`, eventos `📅 Cita`.
 - Endpoints: `/api/appointments` CRUD + `/settings`, `/process-reminders`, `/export/excel`, `/template/excel`, `/import/excel?preview=true`.
+
+## Relación con automatizaciones
+Cada transición de cita (crear, confirmar, posponer, completar, cancelar, no-show)
+emite un evento al Automation Core: de ahí salen recordatorios y seguimientos
+programados. Si el cliente reporta que "no llegó el recordatorio", revisar
+también `automations.md` (`GET /api/automations/jobs?status=FAILED`).
+Cancelar/posponer una cita cancela o mueve sus envíos pendientes automáticamente.
+La importación por Excel NO emite eventos (evita disparos masivos).
 
 ## Escalamiento
 Citas creadas por IA con fecha/hora incorrecta sistemática → Tier 2 (zona horaria/parsing) con ejemplos.

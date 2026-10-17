@@ -15,6 +15,15 @@ export interface CatalogCategory {
   updatedAt: string
 }
 
+/** Unidad del intervalo. "30 días" y "1 mes" no son lo mismo. */
+export type RecurrenceUnit = "DAYS" | "WEEKS" | "MONTHS"
+
+export const RECURRENCE_UNIT_LABELS: Record<RecurrenceUnit, string> = {
+  DAYS: "días",
+  WEEKS: "semanas",
+  MONTHS: "meses",
+}
+
 export interface CatalogItem {
   id: string
   name: string
@@ -31,6 +40,14 @@ export interface CatalogItem {
   sku: string | null
   unit: string
   isActive: boolean
+  // ── Recurrencia del servicio (Módulo 3) ──
+  // Apagada y sin intervalo por defecto: el plazo lo decide el negocio, no
+  // Sendwary. Sin política, completar el servicio no programa nada.
+  recurrenceEnabled: boolean
+  recurrenceInterval: number | null
+  recurrenceUnit: RecurrenceUnit | null
+  /** Texto listo para la UI ("cada 40 días"); null si no tiene recurrencia. */
+  recurrenceLabel: string | null
   createdAt: string
   updatedAt: string
 }
@@ -46,6 +63,11 @@ export interface CatalogItemInput {
   quantity?: number | null
   sku?: string | null
   isActive?: boolean
+  // Recurrencia del servicio (Módulo 3). Sin valor por defecto: el plazo lo
+  // decide el negocio.
+  recurrenceEnabled?: boolean
+  recurrenceInterval?: number | null
+  recurrenceUnit?: RecurrenceUnit | null
 }
 
 export interface ItemFilters {

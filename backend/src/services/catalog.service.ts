@@ -1,6 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../middlewares/error.middleware.js";
+import {
+  describeRecurrence,
+  validateRecurrencePolicy,
+  type RecurrenceUnit,
+} from "./appointment/service-recurrence.js";
 
 // ─── Serialización ────────────────────────────────────────────────────────────
 
@@ -28,6 +33,13 @@ export function serializeItem(item: ItemWithCategory) {
     sku: item.sku,
     unit: item.unit,
     isActive: item.isActive,
+    // Recurrencia (Módulo 3). Solo tiene sentido en servicios; en un producto
+    // se ignora al guardar. Sin intervalo configurado, completar el servicio NO
+    // programa ningún seguimiento: Sendwary no inventa plazos comerciales.
+    recurrenceEnabled: item.recurrenceEnabled,
+    recurrenceInterval: item.recurrenceInterval,
+    recurrenceUnit: item.recurrenceUnit,
+    recurrenceLabel: describeRecurrence(item),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
@@ -182,6 +194,62 @@ export interface ItemInput {
   sku?: string | null;
   unit?: string;
   isActive?: boolean;
+  // ── Recurrencia del servicio (Módulo 3) ──
+  recurrenceEnabled?: boolean;
+  recurrenceInterval?: number | null;
+  recurrenceUnit?: RecurrenceUnit | null;
+}
+
+/**
+ * Normaliza la política de recurrencia antes de guardarla.
+ *
+ * Solo los SERVICIOS pueden repetirse: un producto no tiene "mantenimiento".
+ * Y una política encendida sin intervalo válido se rechaza en vez de guardarse
+ * a medias, que dejaría un servicio marcado como recurrente sin nada detrás.
+ */
+interface RecurrenceFields {
+  recurrenceEnabled?: boolean;
+  recurrenceInterval?: number | null;
+  recurrenceUnit?: RecurrenceUnit | null;
+}
+
+function recurrenceDataFor(
+  input: Partial<ItemInput>,
+  finalType: "PRODUCT" | "SERVICE",
+  current?: { recurrenceEnabled: boolean; recurrenceInterval: number | null; recurrenceUnit: RecurrenceUnit | null }
+): RecurrenceFields {
+  const touched =
+    input.recurrenceEnabled !== undefined ||
+    input.recurrenceInterval !== undefined ||
+    input.recurrenceUnit !== undefined;
+
+  if (finalType !== "SERVICE") {
+    // Al convertir un servicio en producto se apaga su recurrencia: dejarla
+    // encendida programaría seguimientos de algo que ya no se "realiza".
+    return touched || current?.recurrenceEnabled
+      ? { recurrenceEnabled: false, recurrenceInterval: null, recurrenceUnit: null }
+      : {};
+  }
+  if (!touched) return {};
+
+  const policy = {
+    recurrenceEnabled: input.recurrenceEnabled ?? current?.recurrenceEnabled ?? false,
+    recurrenceInterval:
+      input.recurrenceInterval !== undefined
+        ? input.recurrenceInterval
+        : (current?.recurrenceInterval ?? null),
+    recurrenceUnit:
+      input.recurrenceUnit !== undefined
+        ? input.recurrenceUnit
+        : (current?.recurrenceUnit ?? null),
+  };
+
+  const error = validateRecurrencePolicy(policy);
+  if (error) throw new AppError(error, 400);
+
+  return policy.recurrenceEnabled
+    ? policy
+    : { recurrenceEnabled: false, recurrenceInterval: null, recurrenceUnit: null };
 }
 
 async function resolveCategoryName(
@@ -215,6 +283,7 @@ export async function createItem(tenantId: string, input: ItemInput) {
         sku: input.sku?.trim() || null,
         unit: input.unit?.trim() || "unidad",
         isActive: input.isActive ?? true,
+        ...recurrenceDataFor(input, input.type),
       },
       include: itemInclude,
     });
@@ -262,6 +331,8 @@ export async function updateItem(tenantId: string, id: string, input: Partial<It
       : { disconnect: true };
     data.category = categoryName;
   }
+
+  Object.assign(data, recurrenceDataFor(input, input.type ?? existing.itemType, existing));
 
   const finalType = input.type ?? existing.itemType;
   if (finalType === "SERVICE") {

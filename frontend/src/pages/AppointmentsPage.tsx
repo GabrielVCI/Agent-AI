@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState, FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   CalendarDays, Plus, Search, Check, X, Clock, UserX, Flag,
-  CheckCircle2, Bell, Bot, Phone, Settings2,
-} from 'lucide-react'
+  CheckCircle2, Bell, Bot, Phone, Settings2, ListChecks, Undo2,
+} from "lucide-react"
 import { useAuth } from '../contexts/AuthContext'
 import { useAutoRefresh } from '../hooks/useAutoRefresh'
 import PaginationBar from '../components/ui/PaginationBar'
@@ -24,6 +24,7 @@ import Alert from '../components/ui/Alert'
 import Modal from '../components/ui/Modal'
 import EmptyState from '../components/ui/EmptyState'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
+import AppointmentLinesModal from '../components/appointments/AppointmentLinesModal'
 
 const inputClass =
   'w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent placeholder:text-slate-400 transition'
@@ -723,6 +724,8 @@ export default function AppointmentsPage() {
     }
   }, [searchParams, setSearchParams])
   const [rescheduling, setRescheduling] = useState<Appointment | null>(null)
+  // Servicios y productos de la cita (Módulo 3)
+  const [linesFor, setLinesFor] = useState<Appointment | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [processingReminders, setProcessingReminders] = useState(false)
   const [actionBusy, setActionBusy] = useState<string | null>(null)
@@ -1036,6 +1039,18 @@ export default function AppointmentsPage() {
 
                     {canManage && !isClosed && (
                       <div className="flex flex-wrap gap-1.5">
+                        {/* Qué se atendió: se registra ANTES de cerrar la cita,
+                            porque al cerrarla el historial queda congelado. */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          icon={<ListChecks className="h-3.5 w-3.5" />}
+                          onClick={() => setLinesFor(a)}
+                        >
+                          Servicios
+                          {a.lines.length > 0 && ` (${a.lines.length})`}
+                        </Button>
                         {a.status !== 'CONFIRMED' && (
                           <Button
                             size="sm"
@@ -1106,6 +1121,39 @@ export default function AppointmentsPage() {
                         </Button>
                       </div>
                     )}
+
+                    {/* Cita cerrada: su historial es de solo lectura, pero un
+                        cierre equivocado se puede corregir reabriéndola (el
+                        backend recalcula visitas y cancela sus seguimientos). */}
+                    {canManage && a.status === 'COMPLETED' && (
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          icon={<ListChecks className="h-3.5 w-3.5" />}
+                          onClick={() => setLinesFor(a)}
+                        >
+                          Ver servicios
+                          {a.lines.length > 0 && ` (${a.lines.length})`}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy}
+                          icon={<Undo2 className="h-3.5 w-3.5" />}
+                          onClick={() =>
+                            runAction(
+                              a.id,
+                              () => appointmentsApi.reopen(a.id, 'corrección desde el panel'),
+                              'Cita reabierta. Las métricas del cliente se recalcularon.'
+                            )
+                          }
+                        >
+                          Reabrir
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               )
@@ -1152,6 +1200,13 @@ export default function AppointmentsPage() {
           flash('Cita pospuesta')
           load()
         }}
+      />
+
+      <AppointmentLinesModal
+        open={linesFor !== null}
+        appointment={linesFor}
+        onClose={() => setLinesFor(null)}
+        onChanged={() => void load()}
       />
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
