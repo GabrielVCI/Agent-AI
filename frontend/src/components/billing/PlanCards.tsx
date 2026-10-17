@@ -3,8 +3,10 @@ import { Check, Sparkles } from 'lucide-react'
 import Button from '../ui/Button'
 import Alert from '../ui/Alert'
 import LoadingSpinner from '../ui/LoadingSpinner'
+import PaymentConfirming from './PaymentConfirming'
 import api from '../../lib/api'
 import { openPlanCheckout } from '../../lib/lemonCheckout'
+import { useBillingConfirmation } from '../../hooks/useBillingConfirmation'
 
 interface BillingPlan {
   id: string
@@ -28,6 +30,12 @@ export default function PlanCards({ currentPlanCode }: { currentPlanCode?: strin
   const [notice, setNotice] = useState('')
   const [busyCode, setBusyCode] = useState<string | null>(null)
 
+  // Misma espera que en el paywall: el pago lo confirma el backend, no el
+  // navegador. Al confirmarse se recarga para que todo el panel vea el plan nuevo.
+  const { phase, isConfirming, retry } = useBillingConfirmation({
+    onActivated: () => window.location.reload(),
+  })
+
   useEffect(() => {
     api
       .get<BillingPlan[]>('/api/billing/plans')
@@ -39,10 +47,9 @@ export default function PlanCards({ currentPlanCode }: { currentPlanCode?: strin
   }, [])
 
   const handleSelect = async (plan: BillingPlan) => {
-    if (!plan.code) return
-    setBusyCode(plan.code)
+    setBusyCode(plan.code ?? plan.id)
     setNotice('')
-    const result = await openPlanCheckout(plan.code)
+    const result = await openPlanCheckout({ planId: plan.id })
     if (!result.ok && result.message) setNotice(result.message)
     setBusyCode(null)
   }
@@ -57,6 +64,8 @@ export default function PlanCards({ currentPlanCode }: { currentPlanCode?: strin
   if (error) return <Alert variant="warning">{error}</Alert>
   if (plans.length === 0) return null
 
+  const comprasBloqueadas = isConfirming || phase === 'timeout' || phase === 'active'
+
   return (
     <div className="space-y-4">
       <div>
@@ -67,6 +76,8 @@ export default function PlanCards({ currentPlanCode }: { currentPlanCode?: strin
       </div>
 
       {notice && <Alert variant="info">{notice}</Alert>}
+      <PaymentConfirming phase={phase} onRetry={retry} variant="inline" context="checkout" />
+
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-stretch">
         {plans.map(plan => {
@@ -120,11 +131,18 @@ export default function PlanCards({ currentPlanCode }: { currentPlanCode?: strin
               <Button
                 className="mt-5 w-full"
                 variant={isCurrent ? 'secondary' : plan.isPopular ? 'primary' : 'outline'}
-                disabled={isCurrent}
-                loading={busyCode === plan.code}
+                // Con un pago en confirmación se bloquean TODOS los planes, no
+                // solo el comprado: pulsar otro abriría un segundo cobro.
+                disabled={isCurrent || comprasBloqueadas}
+                aria-busy={comprasBloqueadas}
+                loading={busyCode === (plan.code ?? plan.id)}
                 onClick={() => handleSelect(plan)}
               >
-                {isCurrent ? 'Tu plan actual' : `Elegir ${plan.name}`}
+                {comprasBloqueadas && !isCurrent
+                  ? 'Confirmando pago…'
+                  : isCurrent
+                    ? 'Tu plan actual'
+                    : `Elegir ${plan.name}`}
               </Button>
             </div>
           )

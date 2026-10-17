@@ -158,6 +158,67 @@ function decimalOrNull(value: Prisma.Decimal | null | undefined): number | null 
 
 const PAST_DUE_GRACE_DAYS = 3;
 
+/**
+ * Ventana durante la cual un pago de LemonSqueezy recién hecho se considera
+ * "en confirmación".
+ *
+ * Existe por la carrera real entre el redirect y el webhook: el cliente puede
+ * pulsar "Continuar" y llegar al panel antes de que el webhook del primer
+ * cobro termine. Durante esta ventana NO se le enseña el paywall —se le enseña
+ * "estamos confirmando"— para que no pague dos veces.
+ *
+ * Es una ventana corta a propósito: pasado ese tiempo, una correlación que
+ * sigue sin confirmarse ya no puede seguir tapando el paywall indefinidamente.
+ */
+const PENDING_CONFIRMATION_WINDOW_MINUTES = 30;
+
+/**
+ * Estados de correlación que significan "hay dinero en vuelo": LemonSqueezy ya
+ * creó la suscripción (o ya cobró) pero el alta local todavía no se completó.
+ * `PROCESSED` no está: ese ya terminó. `INVALID` tampoco: ese no va a terminar.
+ */
+const PENDING_CORRELATION_STATES = ["PENDING_PAYMENT", "PENDING_CORRELATION", "PAID"] as const;
+
+/**
+ * Regla ÚNICA de acceso, resuelta en el backend. El frontend la consume, no la
+ * reimplementa: solo decide qué pantalla pinta para cada valor.
+ */
+export type BillingAccessState = "ALLOWED" | "PENDING_CONFIRMATION" | "PAYWALL_REQUIRED";
+
+export interface PaymentConfirmationState {
+  /** true = hay un pago de LemonSqueezy esperando confirmación del webhook. */
+  pending: boolean;
+  /** Cuándo se supo por última vez de ese pago (para el timeout de la UI). */
+  since: Date | null;
+}
+
+/**
+ * ¿Este tenant tiene un pago de LemonSqueezy a medio confirmar?
+ *
+ * La fuente es la correlación que deja el webhook `subscription_created`, que
+ * ya existe: no hace falta ninguna tabla nueva ni que el navegador nos cuente
+ * nada. Si el navegador dijera "estoy pagando", cualquiera podría saltarse el
+ * paywall simplemente afirmándolo.
+ */
+export async function getPaymentConfirmationState(
+  tenantId: string,
+  now = new Date()
+): Promise<PaymentConfirmationState> {
+  const desde = new Date(now.getTime() - PENDING_CONFIRMATION_WINDOW_MINUTES * 60_000);
+
+  const correlation = await prisma.lemonSqueezySubscriptionCorrelation.findFirst({
+    where: {
+      tenantId,
+      status: { in: [...PENDING_CORRELATION_STATES] },
+      updatedAt: { gte: desde },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { updatedAt: true },
+  });
+
+  return { pending: Boolean(correlation), since: correlation?.updatedAt ?? null };
+}
+
 export interface TenantBillingStatus {
   hasActivePlan: boolean;
   planCode: string | null;
@@ -166,15 +227,36 @@ export interface TenantBillingStatus {
   billingMode: string | null;
   lemonSqueezySubscriptionId: string | null;
   currentPeriodEnd: Date | null;
-  /** Motivo cuando NO hay plan activo, o warning informativo (PAST_DUE en gracia). */
+  /** Fin del acceso ya pagado tras cancelar (LemonSqueezy `ends_at`). */
+  endsAt: Date | null;
+  /** true = pago hecho en LemonSqueezy, esperando la confirmación del webhook. */
+  paymentConfirmationPending: boolean;
+  /** Qué debe hacer el frontend: entrar, esperar confirmando, o pedir pago. */
+  accessState: BillingAccessState;
+  /** Motivo cuando NO hay plan activo, o warning informativo (gracia/cancelada). */
   reason:
     | "OK"
     | "PAST_DUE_GRACE" // activo con warning: pago vencido, dentro de los 3 días de gracia
+    | "CANCELLED_GRACE" // activo con warning: cancelada pero pagada hasta endsAt
     | "NO_SUBSCRIPTION"
     | "PAST_DUE_EXPIRED"
     | "CANCELLED"
     | "EXPIRED"
     | "TRIAL_ENDED";
+}
+
+/**
+ * ¿Queda período ya pagado por delante?
+ *
+ * Una suscripción cancelada en LemonSqueezy (`status = cancelled`) sigue siendo
+ * válida hasta `ends_at`: el cliente pagó ese mes y no se le corta el servicio
+ * antes de tiempo. Cancelar ≠ perder el acceso al instante.
+ *
+ * Las suscripciones manuales/custom no traen `endsAt`: para ellas esto es
+ * false y el comportamiento anterior se conserva intacto.
+ */
+function hasPaidPeriodLeft(subscription: { endsAt: Date | null }, now = Date.now()): boolean {
+  return Boolean(subscription.endsAt && subscription.endsAt.getTime() > now);
 }
 
 /**
@@ -185,10 +267,37 @@ export interface TenantBillingStatus {
  *   manualmente o on_trial de LemonSqueezy); vencido → paywall.
  * - PAST_DUE → activo CON WARNING durante 3 días de gracia tras
  *   currentPeriodEnd; luego paywall.
- * - CANCELLED/EXPIRED/sin suscripción → paywall.
+ * - CANCELLED → activo hasta `endsAt` (el período ya está pagado); pasado
+ *   ese momento, paywall. Las cancelaciones manuales no traen endsAt y
+ *   bloquean de inmediato, igual que antes.
+ * - EXPIRED/sin suscripción → paywall.
  * El bypass de SUPER_ADMIN es del guard (no llega aquí: no tiene tenant).
  */
 export async function getTenantBillingStatus(tenantId: string): Promise<TenantBillingStatus> {
+  const status = await resolveBillingStatus(tenantId);
+
+  // Con plan activo no hace falta preguntar nada más: el caso normal no paga
+  // una consulta extra. Solo cuando el paywall aplicaría se mira si hay un pago
+  // en vuelo, que es justo la carrera "Continuar antes que el webhook".
+  if (status.hasActivePlan) {
+    return { ...status, paymentConfirmationPending: false, accessState: "ALLOWED" };
+  }
+
+  const confirmation = await getPaymentConfirmationState(tenantId);
+  if (confirmation.pending) {
+    logger.info("[BILLING] billing.confirmation.pending", { tenantId });
+  }
+  return {
+    ...status,
+    paymentConfirmationPending: confirmation.pending,
+    accessState: confirmation.pending ? "PENDING_CONFIRMATION" : "PAYWALL_REQUIRED",
+  };
+}
+
+/** Estado derivado SOLO de la suscripción (sin pagos en vuelo). */
+async function resolveBillingStatus(
+  tenantId: string
+): Promise<Omit<TenantBillingStatus, "paymentConfirmationPending" | "accessState">> {
   const subscription = await prisma.subscription.findUnique({
     where: { tenantId },
     include: { plan: { select: { code: true, name: true } } },
@@ -203,6 +312,7 @@ export async function getTenantBillingStatus(tenantId: string): Promise<TenantBi
     billingMode: subscription?.billingMode ?? null,
     lemonSqueezySubscriptionId: subscription?.lemonSqueezySubscriptionId ?? null,
     currentPeriodEnd: subscription?.currentPeriodEnd ?? null,
+    endsAt: subscription?.endsAt ?? null,
   };
 
   if (!subscription) {
@@ -228,8 +338,15 @@ export async function getTenantBillingStatus(tenantId: string): Promise<TenantBi
       }
       return { ...base, hasActivePlan: false, reason: "PAST_DUE_EXPIRED" };
     }
-    case "CANCELLED":
+    case "CANCELLED": {
+      // Cancelada pero con período pagado por delante: sigue teniendo acceso.
+      // Cuando llega `ends_at`, LemonSqueezy manda subscription_expired y el
+      // estado pasa a EXPIRED; esta comprobación cubre el intervalo.
+      if (hasPaidPeriodLeft(subscription)) {
+        return { ...base, hasActivePlan: true, reason: "CANCELLED_GRACE" };
+      }
       return { ...base, hasActivePlan: false, reason: "CANCELLED" };
+    }
     case "EXPIRED":
     default:
       return { ...base, hasActivePlan: false, reason: "EXPIRED" };
@@ -261,6 +378,10 @@ export interface TenantActivationState {
   shouldShowPaywall: boolean;
   shouldShowImplementationScreen: boolean;
   paywallBypassUntil: Date | null;
+  /** true = pago hecho en LemonSqueezy, esperando la confirmación del webhook. */
+  paymentConfirmationPending: boolean;
+  /** Qué debe hacer el frontend: entrar, esperar confirmando, o pedir pago. */
+  accessState: BillingAccessState;
   reason:
     | "OK"
     | "EMAIL_NOT_VERIFIED"
@@ -287,6 +408,29 @@ export async function getTenantActivationState(
   tenantId: string,
   userEmailVerified: boolean
 ): Promise<TenantActivationState> {
+  const state = await resolveActivationState(tenantId, userEmailVerified);
+
+  // Un pago en vuelo NO abre el dashboard: cambia la pantalla que se enseña.
+  // `shouldShowPaywall` se deja intacto (es el contrato que ya consumen otras
+  // partes); el guard mira `accessState` ANTES de mandar a pagar de nuevo.
+  // `accessState` habla SOLO de facturación. Los gates de correo e
+  // implementación son independientes y el guard los resuelve antes que este.
+  if (!state.shouldShowPaywall) {
+    return { ...state, paymentConfirmationPending: false, accessState: "ALLOWED" };
+  }
+
+  const confirmation = await getPaymentConfirmationState(tenantId);
+  return {
+    ...state,
+    paymentConfirmationPending: confirmation.pending,
+    accessState: confirmation.pending ? "PENDING_CONFIRMATION" : "PAYWALL_REQUIRED",
+  };
+}
+
+async function resolveActivationState(
+  tenantId: string,
+  userEmailVerified: boolean
+): Promise<Omit<TenantActivationState, "paymentConfirmationPending" | "accessState">> {
   const [tenant, billing] = await Promise.all([
     prisma.tenant.findUnique({
       where: { id: tenantId },
@@ -481,9 +625,12 @@ export async function checkAiAllowance(tenantId: string): Promise<AiAllowance> {
 
     // Suscripción cancelada/expirada: IA bloqueada (el owner ve el aviso en
     // el panel; login y lectura de datos NUNCA se bloquean).
+    // Excepción: cancelada CON período pagado por delante sigue operando —
+    // misma regla que el paywall (ver getTenantBillingStatus).
     if (
       info.subscription &&
-      ["CANCELLED", "EXPIRED"].includes(info.subscription.status)
+      ["CANCELLED", "EXPIRED"].includes(info.subscription.status) &&
+      !(info.subscription.status === "CANCELLED" && hasPaidPeriodLeft(info.subscription))
     ) {
       return {
         allowed: false,

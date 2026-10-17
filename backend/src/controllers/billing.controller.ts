@@ -1,23 +1,18 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { prisma } from "../config/prisma.js";
-import { env } from "../config/env.js";
-import { logger } from "../config/logger.js";
-import { AppError } from "../middlewares/error.middleware.js";
+import { AppError } from "../errors/AppError.js";
+import { asyncHandler } from "../errors/async-handler.js";
 import {
   getBillingOverview,
   getTenantBillingStatus,
   getTenantActivationState,
 } from "../services/billing.service.js";
-import {
-  createCheckout,
-  verifyWebhookSignature,
-  handleWebhookEvent,
-} from "../services/lemonsqueezy.service.js";
+import { createCheckout } from "../services/billing/lemon-squeezy/lemonSqueezy.checkout.service.js";
 
 function tenantIdOf(req: Request): string {
   const tenantId = req.user?.tenantId;
-  if (!tenantId) throw new AppError("Usuario no asociado a ninguna empresa", 403);
+  if (!tenantId) throw AppError.fromCode("TENANT_REQUIRED");
   return tenantId;
 }
 
@@ -81,6 +76,10 @@ export async function getActivationStatusController(
       paywallBypassUntil: null,
       shouldShowPaywall: false,
       shouldShowImplementationScreen: false,
+      // Ni SUPER_ADMIN ni un usuario sin empresa están bloqueados por pago:
+      // a ninguno le aplica el paywall, así que tampoco hay nada "en confirmación".
+      paymentConfirmationPending: false,
+      accessState: "ALLOWED" as const,
     };
 
     if (req.user.role === "SUPER_ADMIN") {
@@ -146,66 +145,61 @@ export async function getUsageController(req: Request, res: Response, next: Next
   }
 }
 
-const checkoutSchema = z.object({
-  planCode: z.enum(["BASIC", "PRO", "ENTERPRISE"]),
-});
-
-export async function createCheckoutController(req: Request, res: Response, next: NextFunction) {
-  try {
-    if (!req.user) throw new AppError("No autenticado", 401);
-    const tenantId = tenantIdOf(req);
-
-    const parsed = checkoutSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        message: "planCode inválido (BASIC, PRO o ENTERPRISE)",
-        errors: parsed.error.flatten().fieldErrors,
-      });
-      return;
-    }
-
-    const { checkoutUrl, mode } = await createCheckout({
-      tenantId,
-      planCode: parsed.data.planCode,
-      userId: req.user.id,
-      userEmail: req.user.email,
-      userName: req.user.name ?? undefined,
-    });
-
-    res.json({ success: true, data: { checkoutUrl, mode } });
-  } catch (err) {
-    next(err);
-  }
-}
+/**
+ * Lo ÚNICO que el frontend puede elegir es el plan (por id interno; `planCode`
+ * se acepta por compatibilidad con el contrato anterior).
+ *
+ * `.strict()` es deliberado: una request que intente colar `tenantId`,
+ * `variantId`, `storeId` o `productId` se rechaza con 400 en vez de que esos
+ * valores pasen inadvertidos. El tenant SIEMPRE sale de la sesión.
+ */
+const checkoutSchema = z
+  .object({
+    planId: z.string().min(1).optional(),
+    planCode: z.enum(["BASIC", "PRO", "ENTERPRISE"]).optional(),
+  })
+  .strict()
+  .refine((data) => Boolean(data.planId || data.planCode), {
+    message: "Indica el plan que quieres activar.",
+  });
 
 /**
- * Webhook de LemonSqueezy. Sin auth de sesión (lo llama LemonSqueezy); la
- * autenticidad se valida con la firma HMAC del cuerpo crudo (X-Signature).
+ * POST /api/billing/create-checkout
+ * POST /api/billing/lemon-squeezy/checkout   (alias canónico)
+ *
+ * Devuelve SOLO la URL de checkout. Ni API key, ni store id, ni variante: el
+ * navegador nunca ve configuración del proveedor.
  */
-export async function lemonSqueezyWebhookController(req: Request, res: Response) {
-  try {
-    if (!env.LEMONSQUEEZY_WEBHOOK_SECRET) {
-      logger.warn("[LEMONSQUEEZY] webhook recibido pero LEMONSQUEEZY_WEBHOOK_SECRET no está configurado");
-      res.status(503).json({ success: false, message: "Webhook secret not configured" });
-      return;
-    }
+export const createCheckoutController = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.user) throw AppError.fromCode("UNAUTHENTICATED");
+  const tenantId = tenantIdOf(req);
 
-    const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
-    const signature = req.headers["x-signature"] as string | undefined;
-
-    if (!rawBody || !verifyWebhookSignature(rawBody, signature)) {
-      logger.warn("[LEMONSQUEEZY] firma de webhook inválida");
-      res.status(401).json({ success: false, message: "Invalid signature" });
-      return;
-    }
-
-    const result = await handleWebhookEvent(req.body);
-    res.json({ success: true, data: result });
-  } catch (err) {
-    // Nunca 5xx en cascada hacia LemonSqueezy por errores propios recuperables:
-    // se loguea y se responde 200 para evitar reintentos infinitos, salvo fallo real.
-    logger.error(`[LEMONSQUEEZY] error procesando webhook: ${String(err)}`);
-    res.status(500).json({ success: false, message: "Webhook processing error" });
+  const parsed = checkoutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw AppError.fromCode("VALIDATION_ERROR", {
+      message: "Indica un plan válido para continuar.",
+      details: { fieldErrors: parsed.error.flatten().fieldErrors },
+      internalMessage: `create-checkout con body inválido: ${JSON.stringify(
+        parsed.error.flatten().fieldErrors
+      )}`,
+    });
   }
-}
+
+  const result = await createCheckout({
+    tenantId,
+    userId: req.user.id,
+    userEmail: req.user.email,
+    userName: req.user.name ?? undefined,
+    ...(parsed.data.planId ? { planId: parsed.data.planId } : {}),
+    ...(parsed.data.planCode ? { planCode: parsed.data.planCode } : {}),
+  });
+
+  res.json({
+    success: true,
+    data: {
+      checkoutUrl: result.checkoutUrl,
+      checkoutId: result.checkoutId,
+      planId: result.planId,
+    },
+  });
+});

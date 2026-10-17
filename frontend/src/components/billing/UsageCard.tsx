@@ -102,7 +102,7 @@ export default function UsageCard({
     const nextCode = data.plan?.code === 'BASIC' ? 'PRO' : 'ENTERPRISE'
     setUpgrading(true)
     setUpgradeMsg('')
-    const result = await openPlanCheckout(nextCode)
+    const result = await openPlanCheckout({ planCode: nextCode })
     if (!result.ok && result.message) setUpgradeMsg(result.message)
     setUpgrading(false)
   }

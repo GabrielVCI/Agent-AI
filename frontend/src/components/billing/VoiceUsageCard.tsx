@@ -39,7 +39,7 @@ export default function VoiceUsageCard() {
   const handleUpgrade = async () => {
     setUpgrading(true)
     setUpgradeMsg('')
-    const result = await openPlanCheckout('ENTERPRISE')
+    const result = await openPlanCheckout({ planCode: 'ENTERPRISE' })
     if (!result.ok && result.message) setUpgradeMsg(result.message)
     setUpgrading(false)
   }
